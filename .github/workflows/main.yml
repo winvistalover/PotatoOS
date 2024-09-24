@@ -9,7 +9,7 @@ jobs:
       - uses: actions/checkout@v4
         name: Checkout
       - name: Get the build-tools
-        run: sudo add-apt-repository universe && sudo wget https://raw.githubusercontent.com/lordmilko/i686-elf-tools/master/i686-elf-tools.sh && chmod +x ./i686-elf-tools.sh && ./i686-elf-tools.sh && rm i686-elf-tools.sh
+        run: sudo add-apt-repository universe && sudo wget https://raw.githubusercontent.com/lordmilko/i686-elf-tools/master/i686-elf-tools.sh && sudo chmod +x ./i686-elf-tools.sh && sudo ./i686-elf-tools.sh && sudo rm i686-elf-tools.sh
       - name: Build kernel image
         run: sh build.sh
       - name: Upload kernel image as artifact
