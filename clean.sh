@@ -8,4 +8,4 @@ done
 
 rm -rf sysroot
 rm -rf isodir
-rm -rf potatoOSos.iso
+rm -rf potatoOS.iso
