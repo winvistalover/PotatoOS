@@ -1,0 +1,19 @@
+name: Build potatoOS ISO and kernel image
+
+on:
+  workflow_dispatch:
+jobs:
+  build-kernel:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        name: Checkout
+      - name: Get the build-tools
+        run: sudo add-apt-repository universe && sudo wget https://raw.githubusercontent.com/lordmilko/i686-elf-tools/master/i686-elf-tools.sh && chmod +x ./i686-elf-tools.sh && ./i686-elf-tools.sh && rm i686-elf-tools.sh
+      - name: Build kernel image
+        run: sh build.sh
+      - name: Upload kernel image as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: kernel.image
+          path: sysroot/boot/potatoos.kernel
