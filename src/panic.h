@@ -1,0 +1,1 @@
+void panic(char* msg);

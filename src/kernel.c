@@ -34,6 +34,10 @@ static inline char* osname = "PotatoOS";
 static inline char* version = "0";
 static inline char* subversion = "2";
 
+static inline char* username = "potato";
+static inline char* hostname = "live";
+
+
 static inline uint8_t vga_entry_color(enum vga_color fg, enum vga_color bg) 
 {
 	return fg | bg << 4;
@@ -193,8 +197,10 @@ void handle_keyboard_input() {
 	    	} else {
 			terminal_newline();
 		}
-
-		terminal_writestring("> ");
+		terminal_writestring(username);
+		terminal_writestring("@");
+		terminal_writestring(hostname);
+		terminal_writestring(" /> ");	
 
 		//if (data == 'hi') {
             	//	terminal_writestring("hello");
@@ -208,15 +214,34 @@ void handle_keyboard_input() {
 }
 
 
+
+const bool load_ahci_driver = false;
+
+void panic(char* msg) 
+{
+	terminal_newline();
+	terminal_writestring(msg);
+	terminal_newline();
+	terminal_writestring("Kernel panic!");
+	__asm__("hlt");
+}
+
+//void basic_vga_driver() 
+//{
+//    __asm__ __volatile__ (
+//        "int $0x10"
+//        :
+//        : "a"(0x00 | 0x03) 
+//    );
+//}
 void kernel_main(void) 
 {
 	/* Initialize terminal interface */
 	terminal_initialize();
-
 	terminal_row = 23;
 	terminal_color = vga_entry_color(VGA_COLOR_BLACK, VGA_COLOR_WHITE);
-	terminal_writestring("help = help   ls = list   rm = delete   cd = change dir                     ");
-	terminal_color = vga_entry_color(VGA_COLOR_WHITE, VGA_COLOR_LIGHT_BLUE);
+	terminal_writestring(" help = help   ls = list   rm = delete   cd = change dir                    ");
+	terminal_color = vga_entry_color(VGA_COLOR_LIGHT_GREEN, VGA_COLOR_LIGHT_BLUE);
 	terminal_row = 1;
 	terminal_column = 2;
     	terminal_writestring("Welcome to ");
@@ -229,12 +254,29 @@ void kernel_main(void)
 	terminal_newline();
 	terminal_color = vga_entry_color(VGA_COLOR_YELLOW, VGA_COLOR_LIGHT_BLUE); 
 	terminal_writestring("WARNING: PotatoOS is in alpha! I am NOT responsible for ANY data loss.");
-	
+
 	terminal_color = vga_entry_color(VGA_COLOR_WHITE, VGA_COLOR_LIGHT_BLUE);
+	terminal_newline();	
+	if (load_ahci_driver) {
+		terminal_writestring("[   ] Start basic AHCI driver...");
+	} else {
+		terminal_writestring("[ SKIP ] Start basic AHCI driver...");
+	}
+
 	terminal_newline();
-	terminal_writestring("> ");	
+	terminal_writestring("[ OK ] Start trash keyboard driver that I will fix later...");
+	
+	//terminal_newline();
+	//terminal_writestring("[   ] Start less basic but still basic VGA driver...");
+	
+	//basic_vga_driver();	
+	
+	terminal_newline();
+	terminal_writestring(username);
+	terminal_writestring("@");
+	terminal_writestring(hostname);
+	terminal_writestring(" /> ");	
 	while (1) {
         	handle_keyboard_input();
     	}
 }
-
