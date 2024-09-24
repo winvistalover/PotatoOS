@@ -202,6 +202,10 @@ void panic(char* msg)
 //        : "a"(0x00 | 0x03) 
 //    );
 //}
+void disable_cursor() {
+	outb(0x3D4, 0x0A);
+	outb(0x3D5, 0x20);
+}
 void kernel_main(void) 
 {
 	/* Initialize terminal interface */
@@ -233,7 +237,7 @@ void kernel_main(void)
 
 	terminal_newline();
 	terminal_writestring("[ OK ] Start trash keyboard driver that I will fix later...");
-	
+	disable_cursor();
 	//terminal_newline();
 	//terminal_writestring("[   ] Start less basic but still basic VGA driver...");
 	
