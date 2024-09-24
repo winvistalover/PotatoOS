@@ -10,10 +10,15 @@ jobs:
         name: Checkout
       - name: Get the build-tools
         run: sudo add-apt-repository universe && sudo wget https://raw.githubusercontent.com/lordmilko/i686-elf-tools/master/i686-elf-tools.sh && sudo chmod +x ./i686-elf-tools.sh && sudo ./i686-elf-tools.sh && sudo rm i686-elf-tools.sh
-      - name: Build kernel image
+      - name: Build kernel and ISO image
         run: sh build.sh
       - name: Upload kernel image as artifact
         uses: actions/upload-artifact@v4
         with:
-          name: kernel.image
+          name: kernel-image
           path: sysroot/boot/potatoos.kernel
+      - name: Upload ISO
+        with: actions/upload-artifact@4
+        with:
+          name: iso-image
+          path: potatoOS.iso
