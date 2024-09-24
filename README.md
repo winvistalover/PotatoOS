@@ -11,3 +11,4 @@ pacman -S qemu
 yay -S i686-elf-gcc
 ```
 Atleast I think, I forgot what commands I used lol.
+This uses parts of [Meaty-Skeleton](https://gitlab.com/sortie/meaty-skeleton).
