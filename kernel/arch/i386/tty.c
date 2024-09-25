@@ -18,7 +18,7 @@ static uint16_t* terminal_buffer;
 
 static inline char* osname = "PotatoOS";
 static inline char* version = "0";
-static inline char* subversion = "2";
+static inline char* subversion = "2.3";
 
 static inline char* username = "potato";
 static inline char* hostname = "live";
@@ -114,7 +114,8 @@ void terminal_newline(void)
 	terminal_column = 2;
 }
 
-const char keyboard_layout[] = {
+
+const char keyboard_layout[128] = {
     0, 0, '1', '2', '3', '4', '5', '6', '7', '8', '9', '0', '-', '=', '\b',
     '\t', 'q', 'w', 'e', 'r', 't', 'y', 'u', 'i', 'o', 'p', '[', ']', '\n',
     0, 'a', 's', 'd', 'f', 'g', 'h', 'j', 'k', 'l', ';', '\'', '`',
@@ -130,57 +131,53 @@ uint8_t read_keyboard() {
         // Wait for data to be available
     }
     data = inb(0x60);
-    if (data < 0x80) {
-        if (keyboard_layout[data] == 0) {
-            return '?';
-        } else {
-            return keyboard_layout[data];
-        }
+
+    if (data & 0x80) {
+        return 0;
     }
+    
+    if (data < sizeof(keyboard_layout)) {
+        return keyboard_layout[data];
+    }
+    
     return 0;
 }
 
 void handle_keyboard_input() {
     uint8_t data = read_keyboard();
-    if (data == 0x0E) {
-        // Handle Backspace key press
-        if (terminal_column > 2) {
+    if (data == 0) {
+        return;
+    }
+
+    if (data == '\b') {
+        if (terminal_column > 0) {
             terminal_column--;
             terminal_putentryat(' ', terminal_color, terminal_column, terminal_row);
         }
     } else {
-        // Handle other key presses
-        if (data != 0) {
-            if (data == '\n') { 
-		if (terminal_row == VGA_HEIGHT - 2) {
-        		terminal_buffer = (uint16_t*) 0xB8000;
-			for (size_t y = 0; y < VGA_HEIGHT; y++) {
-				for (size_t x = 0; x < VGA_WIDTH; x++) {
-					const size_t index = y * VGA_WIDTH + x;
-					terminal_buffer[index] = vga_entry(' ', terminal_color);
-				}
-			}
-			terminal_row = 1;
-			terminal_column = 2;
-	    	} else {
-			terminal_newline();
-		}
-		terminal_writestring(username);
-		terminal_writestring("@");
-		terminal_writestring(hostname);
-		terminal_writestring(" /> ");	
-
-		//if (data == 'hi') {
-            	//	terminal_writestring("hello");
-        	//}
-		// Useless, doesn't work, and I don't feel like fixing it rn.
+        if (data == '\n') { 
+            if (terminal_row == VGA_HEIGHT - 2) {
+                terminal_buffer = (uint16_t*) 0xB8000;
+                for (size_t y = 0; y < VGA_HEIGHT; y++) {
+                    for (size_t x = 0; x < VGA_WIDTH; x++) {
+                        const size_t index = y * VGA_WIDTH + x;
+                        terminal_buffer[index] = vga_entry(' ', terminal_color);
+                    }
+                }
+                terminal_row = 1;
+                terminal_column = 2;
             } else {
-                terminal_putchar(data);
+                terminal_newline();
             }
+            terminal_writestring(username);
+            terminal_writestring("@");
+            terminal_writestring(hostname);
+            terminal_writestring(" /> ");    
+        } else {
+            terminal_putchar(data);
         }
     }
 }
-
 
 
 const bool load_ahci_driver = false;
