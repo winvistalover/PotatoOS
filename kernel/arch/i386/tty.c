@@ -139,6 +139,10 @@ static inline void outw(uint16_t port, uint16_t value) {
 }
 
 
+bool fsinit;
+
+
+
 char* strcpy(char* dest, const char* src) {
     char* original_dest = dest;
     while ((*dest++ = *src++));
@@ -182,36 +186,111 @@ void stop_beep() {
 
 
 
+
 #define MAX_FILES 128
 #define MAX_FILENAME_LENGTH 32
 #define BLOCK_SIZE 512
 #define MAX_BLOCKS 1024
+#define MAX_MOUNTED_DRIVES 4
+
 
 typedef struct {
     char name[MAX_FILENAME_LENGTH];
     uint32_t size; // Size of the file in bytes
-    uint32_t start_block; // Starting block on disk
-} File;
+    uint32_t start_cluster; // Starting cluster on disk
+} FileEntry;
 
 typedef struct {
     uint32_t file_count;
-    File files[MAX_FILES];
+    FileEntry files[MAX_FILES];
 } Directory;
 
 typedef struct {
-    uint8_t block_allocation_table[MAX_BLOCKS]; // 0 = free, 1 = allocated
-    Directory root_directory;
-} Filesystem;
+    uint8_t jump[3];
+    char oem[8];
+    uint16_t bytes_per_sector;
+    uint8_t sectors_per_cluster;
+    uint16_t reserved_sectors;
+    uint8_t num_fats;
+    uint16_t max_root_dir_entries;
+    uint16_t total_sectors_16;
+    uint8_t media_descriptor;
+    uint16_t fat_size_16;
+    uint16_t sectors_per_track;
+    uint16_t number_of_heads;
+    uint32_t hidden_sectors;
+    uint32_t total_sectors_32;
+    uint32_t fat_size_32;
+    uint16_t flags;
+    uint16_t version;
+    uint32_t root_cluster;
+    uint16_t fsinfo_sector;
+    uint16_t backup_boot_sector;
+    uint8_t reserved[12];
+    uint8_t drive_number;
+    uint8_t reserved1;
+    uint8_t boot_signature;
+    uint32_t volume_id;
+    char volume_label[11];
+    char file_system_type[8];
+} __attribute__((packed)) FAT32BootSector;
 
-Filesystem fs;
+typedef struct {
+    bool is_mounted;
+    FAT32BootSector boot_sector;
+    uint32_t fat_start; // Start sector of the FAT
+    uint32_t data_start; // Start sector of the data area
+    Directory root_directory; // Add root directory structure
+} MountedDrive;
 
-#define DISK_PORT 0x1F0
+MountedDrive mounted_drives[MAX_MOUNTED_DRIVES];
 
+
+void read_boot_sector(uint8_t drive_number) {
+    read_block(0, &mounted_drives[drive_number].boot_sector);
+}
+
+void initialize_fat32(uint8_t drive_number) {
+    FAT32BootSector* boot_sector = &mounted_drives[drive_number].boot_sector;
+
+    // Calculate the start of the FAT and data area
+    mounted_drives[drive_number].fat_start = boot_sector->reserved_sectors;
+    mounted_drives[drive_number].data_start = boot_sector->reserved_sectors + (boot_sector->num_fats * boot_sector->fat_size_32);
+}
+
+
+bool mount_drive(uint8_t drive_number) {
+    if (drive_number >= MAX_MOUNTED_DRIVES) {
+        return false; // Invalid drive number
+    }
+
+    MountedDrive* drive = &mounted_drives[drive_number];
+    if (drive->is_mounted) {
+        return false; // Drive already mounted
+    }
+
+    // Read the boot sector
+    read_boot_sector(drive_number);
+    
+    // Initialize the FAT32 structure
+    initialize_fat32(drive_number);
+
+    drive->is_mounted = true;
+
+    terminal_newline();
+    terminal_writestring("[  OK  ] Drive mounted successfully.");
+    return true;
+}
+
+
+
+
+#define DISK_PORT 0x1F1
 void read_block(uint32_t block_num, void* buffer) {
     // Wait for the disk to be ready
     outb(DISK_PORT + 6, 0xE0); // Select drive
     outb(DISK_PORT + 1, 0); // Clear error register
-    outb(DISK_PORT + 2, 0); // Sector count
+    outb(DISK_PORT + 2, 1); // Sector count
     outb(DISK_PORT + 3, (block_num & 0xFF)); // LBA low
     outb(DISK_PORT + 4, (block_num >> 8) & 0xFF); // LBA mid
     outb(DISK_PORT + 5, (block_num >> 16) & 0xFF); // LBA high
@@ -230,7 +309,7 @@ void write_block(uint32_t block_num, const void* buffer) {
     // Wait for the disk to be ready
     outb(DISK_PORT + 6, 0xE0); // Select drive
     outb(DISK_PORT + 1, 0); // Clear error register
-    outb(DISK_PORT + 2, 0); // Sector count
+    outb(DISK_PORT + 2, 1); // Sector count
     outb(DISK_PORT + 3, (block_num & 0xFF)); // LBA low
     outb(DISK_PORT + 4, (block_num >> 8) & 0xFF); // LBA mid
     outb(DISK_PORT + 5, (block_num >> 16) & 0xFF); // LBA high
@@ -245,52 +324,197 @@ void write_block(uint32_t block_num, const void* buffer) {
     }
 }
 
-void write_file(const char* filename, const char* content) {
-    // Find a free block in the block allocation table
-    for (size_t i = 0; i < MAX_BLOCKS; i++) {
-        if (fs.block_allocation_table[i] == 0) {
-            // Allocate the block
-            fs.block_allocation_table[i] = 1;
+uint32_t get_cluster_address(uint32_t cluster_number, MountedDrive* drive) {
+    // Calculate the address of the cluster in the data area
+    return drive->data_start + (cluster_number - 2) * drive->boot_sector.sectors_per_cluster;
+}
 
+void read_cluster(uint32_t cluster_number, void* buffer, MountedDrive* drive) {
+    uint32_t cluster_address = get_cluster_address(cluster_number, drive);
+    for (uint32_t i = 0; i < drive->boot_sector.sectors_per_cluster; i++) {
+        read_block(cluster_address + i, (uint8_t*)buffer + (i * BLOCK_SIZE));
+    }
+}
+
+void write_cluster(uint32_t cluster_number, const void* buffer, MountedDrive* drive) {
+    uint32_t cluster_address = get_cluster_address(cluster_number, drive);
+    for (uint32_t i = 0; i < drive->boot_sector.sectors_per_cluster; i++) {
+        write_block(cluster_address + i, (const uint8_t*)buffer + (i * BLOCK_SIZE));
+    }
+}
+
+void read_root_directory(uint8_t drive_number) {
+    MountedDrive* drive = &mounted_drives[drive_number];
+    uint32_t cluster = drive->boot_sector.root_cluster;
+
+    // Read the root directory entries starting from the root cluster
+    for (size_t i = 0; i < MAX_FILES; i++) {
+        FileEntry entry;
+        // Read the cluster into the entry (you will need to implement the logic to read the directory entries)
+        // For example, read the first cluster of the root directory
+        read_cluster(cluster, &entry, drive);
+        
+        // Check if the entry is valid (e.g., not deleted)
+        if (entry.size > 0) {
+            drive->root_directory.files[drive->root_directory.file_count++] = entry;
+        }
+        
+        // Move to the next entry (you will need to implement the logic to find the next entry)
+    }
+}
+
+#define FAT_ENTRY_SIZE 4 // FAT32 uses 32-bit entries
+
+void read_fat_table(uint32_t* fat_table, MountedDrive* drive) {
+    uint32_t fat_start = drive->fat_start;
+    for (uint32_t i = 0; i < (drive->boot_sector.fat_size_32 * drive->boot_sector.num_fats); i++) {
+        read_block(fat_start + i, (uint8_t*)&fat_table[i * BLOCK_SIZE / FAT_ENTRY_SIZE]);
+    }
+}
+
+
+bool is_cluster_free(uint32_t cluster_number, uint32_t* fat_table) {
+    return (fat_table[cluster_number] == 0);
+}
+
+
+uint32_t find_free_cluster(MountedDrive* drive) {
+    uint32_t fat_table[BLOCK_SIZE / FAT_ENTRY_SIZE]; // Adjust size as needed
+    read_fat_table(fat_table, drive); // Read the FAT table into memory
+
+    // Iterate through the FAT table to find a free cluster
+    for (uint32_t i = 2; i < (drive->boot_sector.total_sectors_32 / drive->boot_sector.sectors_per_cluster); i++) {
+        if (is_cluster_free(i, fat_table)) {
+            return i; // Return the first free cluster found
+        }
+    }
+    return 0; // No free cluster found
+}
+
+
+void write_file(uint8_t drive_number, const char* filename, const char* content) {
+    MountedDrive* drive = &mounted_drives[drive_number];
+
+    // Find a free entry in the root directory
+    for (size_t i = 0; i < MAX_FILES; i++) {
+        if (drive->root_directory.files[i].size == 0) { // Assuming size 0 means free
             // Create the file entry
-            File new_file;
-            strcpy(new_file.name, filename);
+            FileEntry new_file;
+            strncpy(new_file.name, filename, MAX_FILENAME_LENGTH);
             new_file.size = strlen(content);
-            new_file.start_block = i;
+            new_file.start_cluster = find_free_cluster(drive); // Find a free cluster
 
-            // Write the file content to the allocated block
+            // Write the file content to the allocated cluster
             char buffer[BLOCK_SIZE] = {0};
             strncpy(buffer, content, BLOCK_SIZE);
-            write_block(i, buffer);
+            write_cluster(new_file.start_cluster, buffer, drive);
+
+            // Update the FAT table to mark the cluster as used
+            update_fat_entry(new_file.start_cluster, 0xFFFFFFFF, drive); // Mark as end of file (EOF)
 
             // Add the file to the root directory
-            fs.root_directory.files[fs.root_directory.file_count++] = new_file;
+            drive->root_directory.files[drive->root_directory.file_count++] = new_file;
 
-            // Write the updated directory and allocation table back to disk
-            write_block(0, &fs.root_directory);
-            write_block(1, fs.block_allocation_table);
             return;
         }
     }
 }
 
-void read_file(const char* filename) {
-    for (size_t i = 0; i < fs.root_directory.file_count; i++) {
-        if (strcmp(fs.root_directory.files[i].name, filename) == 0) {
+void update_fat_entry(uint32_t cluster_number, uint32_t value, MountedDrive* drive) {
+    uint32_t fat_table[BLOCK_SIZE / FAT_ENTRY_SIZE];
+    read_fat_table(fat_table, drive); // Read the FAT table into memory
+
+    // Update the FAT entry for the specified cluster
+    fat_table[cluster_number] = value;
+
+    // Write the updated FAT table back to disk
+    uint32_t fat_start = drive->fat_start;
+    write_block(fat_start + (cluster_number * FAT_ENTRY_SIZE / BLOCK_SIZE), fat_table);
+}
+
+
+void read_file(uint8_t drive_number, const char* filename) {
+    MountedDrive* drive = &mounted_drives[drive_number];
+
+    for (size_t i = 0; i < drive->root_directory.file_count; i++) {
+        if (strcmp(drive->root_directory.files[i].name, filename) == 0) {
+            FileEntry* file = &drive->root_directory.files[i];
             char buffer[BLOCK_SIZE] = {0};
-            read_block(fs.root_directory.files[i].start_block, buffer);
+
+            // Read the file content from the allocated cluster
+            read_cluster(file->start_cluster, buffer, drive);
             terminal_writestring(buffer);
             return;
         }
     }
 }
 
-void filesystem_initialize() {
-    // Read the root directory and block allocation table from disk
-    read_block(0, &fs.root_directory); // Assuming the root directory is at block 0
-    read_block(1, fs.block_allocation_table); // Assuming the block allocation table is at block 1
+
+void filesystem_initialize(uint8_t drive_number) {
+    terminal_newline();
+    terminal_writestring("[      ] Initialize disk support...");
+
+    // Ensure the drive number is valid
+    if (drive_number >= MAX_MOUNTED_DRIVES) {
+        terminal_writestring("[ERROR] Invalid drive number.");
+        return;
+    }
+
+    mount_drive(1);
+
+    terminal_newline();
+    terminal_writestring("[  OK  ] Initialize disk support...");
+	
 }
 
+
+char *strchr(const char *s, int c) {
+    while (*s != '\0') {
+        if (*s == (char)c) {
+            return (char *)s; // Return a pointer to the first occurrence
+        }
+        s++;
+    }
+    return NULL; // Return NULL if the character is not found
+}
+
+
+char *strtok(char *str, const char *delim) {
+    static char *last = NULL; // Static variable to hold the last token
+    char *current_token;
+
+    // If str is NULL, continue tokenizing the last string
+    if (str == NULL) {
+        str = last;
+    }
+
+    // Skip leading delimiters
+    while (*str && strchr(delim, *str)) {
+        str++;
+    }
+
+    // If we reached the end of the string, return NULL
+    if (*str == '\0') {
+        last = NULL;
+        return NULL;
+    }
+
+    // Find the end of the token
+    current_token = str;
+    while (*str && !strchr(delim, *str)) {
+        str++;
+    }
+
+    // Null-terminate the token
+    if (*str) {
+        *str = '\0'; // Replace delimiter with null terminator
+        last = str + 1; // Save the position for the next call
+    } else {
+        last = NULL; // No more tokens
+    }
+
+    return current_token; // Return the current token
+}
 
 const char keyboard_layout[128] = {
     0, 0, '1', '2', '3', '4', '5', '6', '7', '8', '9', '0', '-', '=', '\b',
@@ -334,6 +558,58 @@ int strncmp(const char *s1, const char *s2, size_t n) {
     return 0;
 }
 
+
+void shutdown() {
+    terminal_newline();
+    terminal_writestring("[      ] Attempting to shutdown computer...");
+	terminal_newline();
+	terminal_writestring("[      ] Shutdown computer using old QEMU...");
+	
+	outw(0xB004, 0x2000);
+
+	terminal_newline();
+	terminal_writestring("[      ] Shutdown computer using new QEMU...");
+
+	outw(0x604, 0x2000);
+
+	terminal_newline();
+	terminal_writestring("[      ] Shutdown computer using Virtualbox...");
+
+	outw(0x4004, 0x3400);
+
+	terminal_newline();
+	terminal_writestring("[ FAIL ] Shutdown computer...");
+	terminal_newline();
+	terminal_writestring("[      ] Sending hlt...");
+
+    while (1) {
+        asm volatile ("hlt");
+    }
+}
+
+void reboot() {
+    // Disable interrupts
+	terminal_newline();
+	terminal_writestring("[      ] Reboot computer...");
+    asm volatile ("cli");
+
+    // Use the BIOS interrupt to reboot
+    asm volatile (
+        "movb $0xFE, %al\n"  // Set the reset command
+        "outb %al, $0x64\n"  // Send the command to the keyboard controller
+    );
+
+    // Hang the CPU if the reboot command fails
+	terminal_newline();
+	terminal_writestring("[ FAIL ] Restart computer...");
+	terminal_newline();
+	terminal_writestring("[      ] Sending hlt...");
+    while (1) {
+        asm volatile ("hlt");
+    }
+}
+
+
 void handle_keyboard_input() {
     uint8_t data = read_keyboard();
     if (data == 0) {
@@ -351,7 +627,17 @@ void handle_keyboard_input() {
             input_buffer[input_buffer_index] = '\0'; // Null-terminate the input
             if (strcmp(input_buffer, "ls") == 0) {
 				terminal_newline();
-				printf("Filesystem support has not been added yet.");
+				if (fsinit != true) {
+					panic("FS NOT INIT!");
+				} else {
+					read_root_directory(3);
+					//printf(mounted_drives[1].fs.root_directory.file_count);
+					//for (size_t i = 0; i < mounted_drives[1].fs.root_directory.file_count; i++) {
+					//	terminal_writestring("File or dir: ");
+            		//	terminal_writestring(mounted_drives[1].fs.root_directory.files[i].name);
+					//	terminal_newline();
+        			//}
+				}
 			//} else if (strncmp(input_buffer, "cat ", 4) == 0) {
             //    read_file(input_buffer + 4); // Read file command
             //} else if (strncmp(input_buffer, "echo ", 5) == 0) {
@@ -381,12 +667,14 @@ void handle_keyboard_input() {
 				}
 				terminal_row = 1;
 				terminal_column = 2;
-			} else if (strcmp(input_buffer, "fsinit") == 0) {
-				terminal_newline();
-				terminal_writestring("[   ] Initialize filesystem...");
-				filesystem_initialize();
+			//} else if (strcmp(input_buffer, "fsinit") == 0) {
+			//	filesystem_initialize();
 			} else if (strcmp(input_buffer, "panic") == 0) {
 				panic("User called panic.");
+			} else if (strcmp(input_buffer, "reboot") == 0) {
+				reboot();
+			} else if (strcmp(input_buffer, "shutdown") == 0) {
+				shutdown();
             } else {
             	terminal_newline();
 				beep(440);
@@ -411,11 +699,16 @@ void handle_keyboard_input() {
 
 const bool load_ahci_driver = false;
 
+#define RAM_START 0x00000000 
+#define RAM_END   0x00003030
+#define DUMP_SIZE 4
+
 void panic(char* msg) 
 {
 	terminal_newline();
 	terminal_writestring(msg);
 	terminal_newline();
+
 	terminal_writestring("Kernel panic!");
 	__asm__("hlt");
 }
@@ -439,20 +732,47 @@ void kernel_main(void)
 	terminal_color = vga_entry_color(VGA_COLOR_LIGHT_GREEN, VGA_COLOR_LIGHT_BLUE);
 	terminal_row = 1;
 	terminal_column = 2;
-    	terminal_writestring("Welcome to ");
-    	terminal_writestring(osname);
-    	terminal_writestring(" ");
-    	terminal_writestring(version);
-    	terminal_writestring(".");
-    	terminal_writestring(subversion);
-    	terminal_writestring("!");
+    terminal_writestring("Welcome to ");
+    terminal_writestring(osname);
+    terminal_writestring(" ");
+    terminal_writestring(version);
+    terminal_writestring(".");
+    terminal_writestring(subversion);
+    terminal_writestring("!");
 	terminal_newline();
 	terminal_color = vga_entry_color(VGA_COLOR_CYAN, VGA_COLOR_LIGHT_BLUE); 
 	terminal_writestring("WARNING: PotatoOS is in alpha! I am NOT responsible for ANY data loss.");
 
 	terminal_color = vga_entry_color(VGA_COLOR_WHITE, VGA_COLOR_LIGHT_BLUE);
 	terminal_newline();	
+	if (mount_drive(0)) {
+		read_root_directory(0);
+        terminal_writestring("Drive 0 mounted.");
+		fsinit = true;
+    }
 
+    if (mount_drive(1)) {
+        terminal_writestring("Drive 1 mounted.");
+		read_root_directory(1);
+		fsinit = true;
+    }
+
+    if (mount_drive(2)) {
+        terminal_writestring("Drive 2 mounted.");
+		read_root_directory(2);
+		fsinit = true;
+    }
+
+    if (mount_drive(3)) {
+        terminal_writestring("Drive 3 mounted.");
+		read_root_directory(3);
+		fsinit = true;
+    }
+
+
+	if (fsinit != true) {
+		panic("FS NOT INIT!");
+	}
 
 	
 	terminal_newline();
