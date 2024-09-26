@@ -4,7 +4,13 @@
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include "FAT.h"
+
+#define NO_ERROR 0
+#define FILE_OPEN_ERROR -1
+#define DATA_READ_ERROR -2
+#define DATA_WRITE_ERROR -3
+#define DATA_MISMATCH_ERROR -4
+
 
 
 #include <kernel/tty.h>
@@ -36,10 +42,19 @@ size_t strlen(const char* str)
 	return len;
 }
 
+
+
 char input_buffer[256];
 size_t input_buffer_index = 0;
 
 bool waitwrite;
+
+
+int mainfat() {
+    terminal_newline();
+    terminal_writestring("[ FAIL ] No FAT FS support yet.");
+    return 0;
+}
 
 
 void terminal_initialize(void) 
@@ -647,6 +662,13 @@ void handle_keyboard_input() {
             //    } else {
             //        terminal_writestring("Usage: echo <filename> <content>\n");
             //    }
+            } else if (strcmp(input_buffer, "ppm") == 0) {
+                terminal_newline();
+                terminal_writestring("PotatoOS Package Manager");
+                terminal_newline();
+                terminal_writestring("Usage ppm [install][remove][update] [package name]");
+                terminal_newline();
+                terminal_writestring("This is a placeholder.");
 			} else if (strcmp(input_buffer, "help") == 0) {
 				terminal_newline();
 				printf("PotatoOS ");
@@ -697,7 +719,7 @@ void handle_keyboard_input() {
             } else if (strcmp(input_buffer, "fatinit") == 0) {
                 terminal_newline();
                 terminal_writestring("[      ] Attempting to initialize FAT...");
-                if (FATInitialize() == 0) {
+                if (mainfat() == 0) {
                     fsinit = true;
                 } else {
                     fsinit = false;
@@ -720,11 +742,14 @@ void handle_keyboard_input() {
                 terminal_color = vga_entry_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK); 
                 outb(0x3D4, 0x0A);
                 outb(0x3D5, 0x02);
-            } else {
+            } else if (input_buffer_index != 0) {
             	terminal_newline();
 				beep(440);
 				char* command = input_buffer;
-                printf("Unknown command.");
+                printf("'");
+                printf(input_buffer);
+                printf("'");
+                printf(" unknown command or file name.");
             }
             terminal_newline();
             terminal_writestring(username);
@@ -958,17 +983,44 @@ void receive_ping() {
     terminal_putchar(icmp->type);
 }
 
+void int32(uint8_t intnum, uint16_t ax, uint16_t bx, uint16_t cx, uint16_t dx, uint16_t *ax_out) {
+    asm volatile (
+        "int $0x10"
+        : "=a"(*ax_out)
+        : "a"(ax), "b"(bx), "c"(cx), "d"(dx)
+    );
+}
+
 void set_vga_mode() {
-    // Set VGA mode to 80x25 text mode
+    /* // Set VGA mode to 80x25 text mode
     //outb(0x3D4, 0x0A); outb(0x3D5, 0x20); // Cursor start
     //outb(0x3D4, 0x0B); outb(0x3D5, 0x0F); // Cursor end
     outb(0x3D4, 0x0C); outb(0x3D5, 0x00); // Start address high
     outb(0x3D4, 0x0D); outb(0x3D5, 0x00); // Start address low
-    outb(0x3D4, 0x09); outb(0x3D5, 0x13); // Maximum scan line
+    outb(0x3D4, 0x09); outb(0x3D5, 0x10); // Maximum scan line
     outb(0x3D4, 0x14); outb(0x3D5, 0x20); // Underline location
-    outb(0x3D4, 0x07); outb(0x3D5, 0xFFFFF); // Vertical display end
-    //outb(0x3D4, 0x12); outb(0x3D5, 0xFFFFF); // Vertical retrace start
-    outb(0x3D4, 0x17); outb(0x3D5, 0xA3); // Mode control
+    outb(0x3D4, 0x07); outb(0x3D5, 0xFFFFFFFF); // Vertical display end
+    outb(0x3D4, 0x12); outb(0x3D5, 0xFFFFF); // Vertical retrace start
+    outb(0x3D4, 0x20); outb(0x3D5, 0xFF); // Vertical retrace start
+    outb(0x3D4, 0x17); outb(0x3D5, 0xA3); // Mode control 
+
+    outb(0x3C4, 0x12); // set mode control register
+    outb(0x3C5, 0x40); // set mode control register value
+    outb(0x3C4, 0x10); // set horizontal total register
+    outb(0x3C5, 0x40); // set horizontal total value
+    outb(0x3C4, 0x11); // set horizontal total high byte register
+    outb(0x3C5, 0x04); // set horizontal total high byte value
+    outb(0x3C4, 0x16); // set vertical total register
+    outb(0x3C5, 0x13); // set vertical total value
+    outb(0x3C4, 0x17); // set vertical total high byte register
+    outb(0x3C5, 0x03); // set vertical total high byte value
+    outb(0x3C4, 0x12); // set mode control register
+    outb(0x3C5, 0x60); // set mode control register value*/
+
+
+
+
+
 }
 
 void kernel_main(void) 
@@ -1002,7 +1054,7 @@ void kernel_main(void)
 	terminal_newline();	
     terminal_newline();
     terminal_writestring("[      ] Attempting to initialize FAT...");
-    //if (FATInitialize() == 0) {
+    //if (mainfat() == 0) {
     //    fsinit = true;
     //}
     
@@ -1013,6 +1065,8 @@ void kernel_main(void)
     uint32_t dest_ip = 0xC0A80002; // 192.168.0.2
     send_ping(dest_ip);
     receive_ping();
+
+    mainfat();
 	
 
 	terminal_newline();
