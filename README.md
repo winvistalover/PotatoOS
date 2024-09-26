@@ -1,6 +1,11 @@
-# PotatoOS
+# PotatoOS Nightly
 A unix-like operating system made in C.
-It's not quite unix-like *yet*. But we're getting there.
+It's not quite unix-like *yet*. But we're getting there.<br>
+https://discord.gg/4Gq4ya5DME
+
+# Contact
+Email me at "ospotato3@gmail.com" or DM me on discord "oslayout" if you have any questions
+
 
 # Build PotatoOS
 Just install qemu and i686-elf-gcc, then run `sh build.sh` and that's pretty much it
