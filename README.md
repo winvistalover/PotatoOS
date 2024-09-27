@@ -29,6 +29,6 @@ sh build.sh
 # 👋 Contact
 Email me at "ospotato3@gmail.com" or DM me on Discord "oslayout" if you have any questions
 
-# ⚖️ License, Credits
+# ⚖️ License and Credits
 This project is licensed under the [MIT License](https://mit-license.org/).
 This project uses parts of [Meaty-Skeleton](https://gitlab.com/sortie/meaty-skeleton).
