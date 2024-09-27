@@ -11,8 +11,8 @@ cat > isodir/boot/grub/grub.cfg << EOF
 GRUB_DEFAULT=pos
 GRUB_TIMEOUT=5
 GRUB_GFXMODE=1440x900
-color_normal=white/dark-gray
-color_highlight=black/light-gray
+color_normal=black/white
+color_highlight=light-gray/black
 
 
 menuentry "PotatoOS"  --id pos{

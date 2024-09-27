@@ -28,7 +28,7 @@ static uint16_t* terminal_buffer;
 
 static inline char* osname = "PotatoOS";
 static inline char* version = "0";
-static inline char* subversion = "2.4.1";
+static inline char* subversion = "2.4.3";
 
 static inline char* username = "potato";
 static inline char* hostname = "live";
@@ -43,6 +43,55 @@ size_t strlen(const char* str)
 }
 
 
+
+void shutdown() {
+    terminal_newline();
+    terminal_writestring("[      ] Attempting to shutdown computer...");
+	terminal_newline();
+	terminal_writestring("[      ] Shutdown computer using old QEMU...");
+	
+	outw(0xB004, 0x2000);
+
+	terminal_newline();
+	terminal_writestring("[      ] Shutdown computer using new QEMU...");
+
+	outw(0x604, 0x2000);
+
+	terminal_newline();
+	terminal_writestring("[      ] Shutdown computer using Virtualbox...");
+
+	outw(0x4004, 0x3400);
+
+	terminal_newline();
+	terminal_writestring("[ FAIL ] Shutdown computer...");
+	terminal_newline();
+	terminal_writestring("[      ] Sending panic...");
+
+    panic("Failed to shutdown computer");
+
+}
+
+void reboot() {
+    // Disable interrupts
+	terminal_newline();
+	terminal_writestring("[      ] Reboot computer...");
+    asm volatile ("cli");
+
+    // Use the BIOS interrupt to reboot
+    asm volatile (
+        "movb $0xFE, %al\n"  // Set the reset command
+        "outb %al, $0x64\n"  // Send the command to the keyboard controller
+    );
+
+    // Hang the CPU if the reboot command fails
+	terminal_newline();
+	terminal_writestring("[ FAIL ] Restart computer...");
+	terminal_newline();
+	terminal_writestring("[      ] Sending hlt...");
+    while (1) {
+        asm volatile ("hlt");
+    }
+}
 
 char input_buffer[256];
 size_t input_buffer_index = 0;
@@ -61,12 +110,24 @@ void terminal_initialize(void)
 {
 	terminal_row = 1;
 	//terminal_column = 0;
+    terminal_color = vga_entry_color(VGA_COLOR_BLACK, VGA_COLOR_LIGHT_GREY);
+	terminal_buffer = (uint16_t*) 0xB8000;
+	for (size_t y = 0; y < VGA_HEIGHT; y++) {
+		for (size_t x = 0; x < VGA_WIDTH; x++) {
+			const size_t index = y * VGA_WIDTH + x;
+			terminal_buffer[index] = vga_entry(' ', terminal_color);
+		}
+	}
+
 	terminal_color = vga_entry_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
 	terminal_buffer = (uint16_t*) 0xB8000;
 	for (size_t y = 0; y < VGA_HEIGHT; y++) {
 		for (size_t x = 0; x < VGA_WIDTH; x++) {
 			const size_t index = y * VGA_WIDTH + x;
 			terminal_buffer[index] = vga_entry(' ', terminal_color);
+            if (waitwrite) {
+                for (volatile int i = 0; i < 60000; i++);
+            }
 		}
 	}
 }
@@ -113,24 +174,28 @@ void terminal_write(const char* data, size_t size)
 {
 	for (size_t i = 0; i < size; i++)
 		terminal_putchar(data[i]);
+        if (waitwrite) {
+            for (volatile int i = 0; i < 6000000; i++);
+        }
 }
 
 void terminal_scroll() {
-    for (int i = 0; i < VGA_HEIGHT - 1; i++) {
+    /*for (int i = 0; i < VGA_HEIGHT - 1; i++) {
         for (int j = 0; j < VGA_WIDTH; j++) {
+            terminal_buffer[i * VGA_WIDTH + j] = terminal_buffer[(i + 1) * VGA_WIDTH + j];
             if (waitwrite) {
                 for (volatile int i = 0; i < 60000000; i++);
             }
-            terminal_buffer[i * VGA_WIDTH + j] = terminal_buffer[(i + 1) * VGA_WIDTH + j];
         }
     }
     for (int j = 0; j < VGA_WIDTH; j++) {
+        terminal_buffer[(VGA_HEIGHT - 1) * VGA_WIDTH + j] = vga_entry(' ', terminal_color);
         if (waitwrite) {
             for (volatile int i = 0; i < 60000000; i++);
         }
-        terminal_buffer[(VGA_HEIGHT - 1) * VGA_WIDTH + j] = vga_entry(' ', terminal_color);
     }
-    terminal_column = 0;
+    terminal_column = 0;*/
+    terminal_initialize();
 }
 
 
@@ -155,7 +220,7 @@ void terminal_newline(void)
 			}
 		}
 		terminal_row = 1;
-		terminal_column = 2;
+		terminal_column = 0;
 	}
 }
 
@@ -204,10 +269,10 @@ void beep(unsigned int frequency) {
     outb(0x61, inb(0x61) | 0x03);
     // Set the PIT to the desired frequency
     unsigned int divisor = 1193180 / frequency; // PIT frequency is 1193180 Hz
-    outb(0x43, 0x26); // Command port: Set the PIT to mode 3 (square wave generator)
+    outb(0x43, 0x27); // Command port: Set the PIT to mode 3 (square wave generator)
     outb(0x40, divisor & 0xFF); // Low byte of divisor
-    outb(0x40, (divisor >> 8) & 0xFF); // High byte of divisor
-    for (volatile int i = 0; i < 600000; i++);
+    outb(0x40, (divisor >> 80) & 0xFF); // High byte of divisor
+    for (volatile int i = 0; i < 60000000; i++);
     stop_beep();
 }
 
@@ -535,7 +600,7 @@ const char keyboard_layout[128] = {
     '\t', 'q', 'w', 'e', 'r', 't', 'y', 'u', 'i', 'o', 'p', '[', ']', '\n',
     0, 'a', 's', 'd', 'f', 'g', 'h', 'j', 'k', 'l', ';', '\'', '`',
     0, '\\', 'z', 'x', 'c', 'v', 'b', 'n', 'm', ',', '.', '/', ' ', 
-    '!', '@', '#', '$', '%', '^', '&', '*', '(', ')', '~',
+    '!', '@', ' ', '$', '%', '^', '&', '*', '(', ')', '~',
     'Q', 'W', 'E', 'R', 'T', 'Y', 'U', 'I', 'O', 'P', 'A', 'S', 'D', 'F', 'G', 'H', 'J', 'K', 'L',
     'Z', 'X', 'C', 'V', 'B', 'N', 'M', '<', '>', '/', '|' 
 };
@@ -558,70 +623,6 @@ uint8_t read_keyboard() {
     return 0;
 }
 
-int strncmp(const char *s1, const char *s2, size_t n) {
-    while (n--) {
-        if (*s1 != *s2) {
-            return (*(unsigned char *)s1 < *(unsigned char *)s2) ? -1 : 1;
-        }
-        if (*s1 == '\0') {
-            return 0;
-        }
-        s1++;
-        s2++;
-    }
-    return 0;
-}
-
-
-void shutdown() {
-    terminal_newline();
-    terminal_writestring("[      ] Attempting to shutdown computer...");
-	terminal_newline();
-	terminal_writestring("[      ] Shutdown computer using old QEMU...");
-	
-	outw(0xB004, 0x2000);
-
-	terminal_newline();
-	terminal_writestring("[      ] Shutdown computer using new QEMU...");
-
-	outw(0x604, 0x2000);
-
-	terminal_newline();
-	terminal_writestring("[      ] Shutdown computer using Virtualbox...");
-
-	outw(0x4004, 0x3400);
-
-	terminal_newline();
-	terminal_writestring("[ FAIL ] Shutdown computer...");
-	terminal_newline();
-	terminal_writestring("[      ] Sending hlt...");
-
-    while (1) {
-        asm volatile ("hlt");
-    }
-}
-
-void reboot() {
-    // Disable interrupts
-	terminal_newline();
-	terminal_writestring("[      ] Reboot computer...");
-    asm volatile ("cli");
-
-    // Use the BIOS interrupt to reboot
-    asm volatile (
-        "movb $0xFE, %al\n"  // Set the reset command
-        "outb %al, $0x64\n"  // Send the command to the keyboard controller
-    );
-
-    // Hang the CPU if the reboot command fails
-	terminal_newline();
-	terminal_writestring("[ FAIL ] Restart computer...");
-	terminal_newline();
-	terminal_writestring("[      ] Sending hlt...");
-    while (1) {
-        asm volatile ("hlt");
-    }
-}
 
 
 void handle_keyboard_input() {
@@ -629,16 +630,15 @@ void handle_keyboard_input() {
     if (data == 0) {
         return;
     }
-
+    input_buffer[input_buffer_index] = '\0';
     if (data == '\b') {
-        if (terminal_column > 0) {
+        if (terminal_column > 15) {
             terminal_column--;
             input_buffer_index -= 1;
             terminal_putentryat(' ', terminal_color, terminal_column, terminal_row);
         }
     } else {
-        if (data == '\n') {
-            input_buffer[input_buffer_index] = '\0'; // Null-terminate the input
+        if (data == '\n') { // Null-terminate the input
             if (strcmp(input_buffer, "ls") == 0) {
 				terminal_newline();
 				if (fsinit != true) {
@@ -677,34 +677,29 @@ void handle_keyboard_input() {
 				printf(subversion);
 				terminal_newline();
 				terminal_newline();
-				printf("help        - shows this message.");
+				printf("help        - ppm.");
 				terminal_newline();
-				printf("clear       - clears the screen.");
+				printf("clear       - panic.");
 				terminal_newline();
-				printf("panic       - kernel panic.");
+				printf("reboot      - g.");
 				terminal_newline();
-				printf("reboot      - reboot.");
+				printf("fatinit     - shutdown.");
 				terminal_newline();
-				printf("g           - set some stuff up.");
+				printf("color       - ls.");
 				terminal_newline();
-				printf("fatinit     - initialize FAT.");
+				printf("echo        - cat.");
 				terminal_newline();
-				printf("shutdown    - shutdown.");
-				terminal_newline();
-				printf("color       - shows colors.");
-				terminal_newline();
-				printf("ls          - list.");
-				terminal_newline();
-				printf("waitwrite   - Waits to write text.");
+				printf("waitwrite   - ld.");
 			} else if (strcmp(input_buffer, "clear") == 0) {
-				terminal_buffer = (uint16_t*) 0xB8000;
+				/*terminal_buffer = (uint16_t*) 0xB8000;
 				for (size_t y = 0; y < VGA_HEIGHT; y++) {
 					for (size_t x = 0; x < VGA_WIDTH; x++) {
 						const size_t index = y * VGA_WIDTH + x;
 						terminal_buffer[index] = vga_entry(' ', terminal_color);
 					}
 				}
-				terminal_row = 1;
+				terminal_row = 1; */
+	            terminal_initialize();
 				//terminal_column = 2;
 			//} else if (strcmp(input_buffer, "fsinit") == 0) {
 			//	filesystem_initialize();
@@ -735,16 +730,16 @@ void handle_keyboard_input() {
                     for (size_t x = 0; x < VGA_WIDTH; x++) {
                         const size_t index = y * VGA_WIDTH + x;
                         terminal_buffer[index] = vga_entry(' ', terminal_color);
-                        for (volatile int i = 0; i < 60000; i++);
+                        for (volatile int i = 0; i < 600000; i++);
                         terminal_color = vga_entry_color(VGA_COLOR_BLACK, x); 
                     }
+				    beep(y);
                 }
                 terminal_color = vga_entry_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK); 
                 outb(0x3D4, 0x0A);
                 outb(0x3D5, 0x02);
             } else if (input_buffer_index != 0) {
             	terminal_newline();
-				beep(440);
 				char* command = input_buffer;
                 printf("'");
                 printf(input_buffer);
@@ -780,7 +775,7 @@ void panic(char* msg)
     outb(0x3D4, 0x0A);
     outb(0x3D5, 0x20);
 	terminal_writestring("PANIC!!!");
-	terminal_color = vga_entry_color(VGA_COLOR_BLACK, VGA_COLOR_WHITE); 
+	terminal_color = vga_entry_color(VGA_COLOR_BLACK, VGA_COLOR_LIGHT_GREY); 
     terminal_buffer = (uint16_t*) 0xB8000;
     for (size_t y = 0; y < VGA_HEIGHT; y++) {
         for (size_t x = 0; x < VGA_WIDTH; x++) {
@@ -788,6 +783,7 @@ void panic(char* msg)
             terminal_buffer[index] = vga_entry(' ', terminal_color);
 			for (volatile int i = 0; i < 600000; i++);
         }
+		beep(7040);
     }
     waitwrite = true;
     terminal_row = 1;
@@ -795,6 +791,8 @@ void panic(char* msg)
 	terminal_writestring("An error occurred and the system has been shutdown."); // ***The cake is a lie***
     terminal_newline();
 	terminal_writestring("Contact me at ospotato3@gmail.com with the error message below, and anything you where doing before this happened.");
+    terminal_newline();
+	terminal_writestring("Github: https://github.com/winvistalover/PotatoOS/tree/nightly");
     terminal_newline();
     terminal_newline();
 	terminal_writestring("Panic: ");
@@ -809,11 +807,12 @@ void panic(char* msg)
 	terminal_newline();
     terminal_newline();
     terminal_newline();
-	terminal_writestring("The system will automatically reboot.");
-    for (volatile int i = 0; i < 600000000; i++);
-    reboot();
 
-	__asm__("hlt");
+    //terminal_writestring("The system will automatically reboot.");
+    //for (volatile int i = 0; i < 600000000; i++);
+    //reboot();
+
+    __asm__("hlt");
 }
 
 //void basic_vga_driver() 
@@ -991,6 +990,66 @@ void int32(uint8_t intnum, uint16_t ax, uint16_t bx, uint16_t cx, uint16_t dx, u
     );
 }
 
+
+#define VESA_SIGNATURE 0x4F56
+#define VESA_GET_INFO 0x4F00
+#define VESA_SET_MODE 0x4F02
+#define VESA_MODE_INFO 0x4F01
+
+typedef struct {
+    uint16_t mode_attributes;
+    uint8_t win_a_attributes;
+    uint8_t win_b_attributes;
+    uint16_t win_granularity;
+    uint16_t win_size;
+    uint16_t win_a_segment;
+    uint16_t win_b_segment;
+    uint32_t win_func_ptr;
+    uint16_t bytes_per_scanline;
+    uint16_t x_resolution;
+    uint16_t y_resolution;
+    uint8_t x_char_size;
+    uint8_t y_char_size;
+    uint8_t number_of_planes;
+    uint8_t bits_per_pixel;
+    uint8_t number_of_banks;
+    uint8_t bank_size;
+    uint8_t number_of_image_pages;
+    uint8_t reserved;
+    uint8_t direct_color_mode_info;
+    uint32_t phys_base_ptr;
+    uint32_t off_screen_mem_offset;
+    uint16_t off_screen_mem_size;
+} __attribute__((packed)) vesa_mode_info_t;
+
+uint16_t vesa_get_info() {
+    uint16_t ax = VESA_GET_INFO;
+    uint16_t result;
+
+    asm volatile (
+        "int $0x10"
+        : "=a"(result)
+        : "a"(ax)
+        : "cc"
+    );
+
+    return result;
+}
+
+uint16_t vesa_set_mode(uint16_t mode) {
+    uint16_t ax = VESA_SET_MODE;
+    uint16_t bx = mode | 0x4000; // Set bit 14 for linear framebuffer
+    uint16_t result;
+
+    asm volatile (
+        "int $0x10"
+        : "=a"(result)
+        : "a"(ax), "b"(bx)
+        : "cc"
+    );
+
+    return result;
+}
 void set_vga_mode() {
     /* // Set VGA mode to 80x25 text mode
     //outb(0x3D4, 0x0A); outb(0x3D5, 0x20); // Cursor start
@@ -1016,20 +1075,25 @@ void set_vga_mode() {
     outb(0x3C5, 0x03); // set vertical total high byte value
     outb(0x3C4, 0x12); // set mode control register
     outb(0x3C5, 0x60); // set mode control register value*/
+    terminal_newline();
+    terminal_writestring("[      ] Set VESA mode...");
+    for (volatile int i = 0; i < 60000000; i++);
+    uint16_t mode = 0x100; // VESA mode for 800x600x32
+    uint16_t result = vesa_set_mode(mode);
 
-
-
-
-
+    if (result != 0x004F) {
+        panic("Failed to set VESA mode");
+        return; 
+    }
 }
 
 void kernel_main(void) 
 {
 	/* Initialize terminal interface */
+    waitwrite = true;
 	terminal_initialize();
     outb(0x3D4, 0x0A);
     outb(0x3D5, 0x02);
-
 
 
 
@@ -1068,6 +1132,7 @@ void kernel_main(void)
 
     mainfat();
 	
+    waitwrite = false;
 
 	terminal_newline();
 	terminal_writestring(username);
