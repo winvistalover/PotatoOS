@@ -5,6 +5,13 @@
 #include <stdio.h>
 #include <stdlib.h>
 
+#define NO_ERROR 0
+#define FILE_OPEN_ERROR -1
+#define DATA_READ_ERROR -2
+#define DATA_WRITE_ERROR -3
+#define DATA_MISMATCH_ERROR -4
+
+
 
 #include <kernel/tty.h>
 
@@ -21,7 +28,7 @@ static uint16_t* terminal_buffer;
 
 static inline char* osname = "PotatoOS";
 static inline char* version = "0";
-static inline char* subversion = "2.4";
+static inline char* subversion = "2.4.3";
 
 static inline char* username = "potato";
 static inline char* hostname = "live";
@@ -35,19 +42,92 @@ size_t strlen(const char* str)
 	return len;
 }
 
+
+
+void shutdown() {
+    terminal_newline();
+    terminal_writestring("[      ] Attempting to shutdown computer...");
+	terminal_newline();
+	terminal_writestring("[      ] Shutdown computer using old QEMU...");
+	
+	outw(0xB004, 0x2000);
+
+	terminal_newline();
+	terminal_writestring("[      ] Shutdown computer using new QEMU...");
+
+	outw(0x604, 0x2000);
+
+	terminal_newline();
+	terminal_writestring("[      ] Shutdown computer using Virtualbox...");
+
+	outw(0x4004, 0x3400);
+
+	terminal_newline();
+	terminal_writestring("[ FAIL ] Shutdown computer...");
+	terminal_newline();
+	terminal_writestring("[      ] Sending panic...");
+
+    panic("Failed to shutdown computer");
+
+}
+
+void reboot() {
+    // Disable interrupts
+	terminal_newline();
+	terminal_writestring("[      ] Reboot computer...");
+    asm volatile ("cli");
+
+    // Use the BIOS interrupt to reboot
+    asm volatile (
+        "movb $0xFE, %al\n"  // Set the reset command
+        "outb %al, $0x64\n"  // Send the command to the keyboard controller
+    );
+
+    // Hang the CPU if the reboot command fails
+	terminal_newline();
+	terminal_writestring("[ FAIL ] Restart computer...");
+	terminal_newline();
+	terminal_writestring("[      ] Sending hlt...");
+    while (1) {
+        asm volatile ("hlt");
+    }
+}
+
 char input_buffer[256];
 size_t input_buffer_index = 0;
+
+bool waitwrite;
+
+
+int mainfat() {
+    terminal_newline();
+    terminal_writestring("[ FAIL ] No FAT FS support yet.");
+    return 0;
+}
+
 
 void terminal_initialize(void) 
 {
 	terminal_row = 1;
-	terminal_column = 2;
-	terminal_color = vga_entry_color(VGA_COLOR_WHITE, VGA_COLOR_LIGHT_BLUE);
+	//terminal_column = 0;
+    terminal_color = vga_entry_color(VGA_COLOR_BLACK, VGA_COLOR_LIGHT_GREY);
 	terminal_buffer = (uint16_t*) 0xB8000;
 	for (size_t y = 0; y < VGA_HEIGHT; y++) {
 		for (size_t x = 0; x < VGA_WIDTH; x++) {
 			const size_t index = y * VGA_WIDTH + x;
 			terminal_buffer[index] = vga_entry(' ', terminal_color);
+		}
+	}
+
+	terminal_color = vga_entry_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
+	terminal_buffer = (uint16_t*) 0xB8000;
+	for (size_t y = 0; y < VGA_HEIGHT; y++) {
+		for (size_t x = 0; x < VGA_WIDTH; x++) {
+			const size_t index = y * VGA_WIDTH + x;
+			terminal_buffer[index] = vga_entry(' ', terminal_color);
+            if (waitwrite) {
+                for (volatile int i = 0; i < 60000; i++);
+            }
 		}
 	}
 }
@@ -57,13 +137,13 @@ void terminal_setcolor(uint8_t color)
 	terminal_color = color;
 }
 
-static inline uint8_t inb(uint16_t port) {
+uint8_t inb(uint16_t port) {
     uint8_t result;
     asm volatile("inb %1, %0" : "=a" (result) : "Nd" (port));
     return result;
 }
 
-static inline void outb(uint16_t port, uint8_t value) {
+void outb(uint16_t port, uint8_t value) {
     asm volatile("outb %0, %1" : : "a" (value), "Nd" (port));
 }
 
@@ -79,6 +159,9 @@ void terminal_putchar(char c)
 	if (terminal_row == VGA_HEIGHT - 1) {
         	terminal_scroll();
     	}
+    if (waitwrite) {
+        for (volatile int i = 0; i < 600000; i++);
+    }
 	terminal_putentryat(c, terminal_color, terminal_column, terminal_row);
 	if (++terminal_column == VGA_WIDTH) {
 		terminal_column = 0;
@@ -91,18 +174,28 @@ void terminal_write(const char* data, size_t size)
 {
 	for (size_t i = 0; i < size; i++)
 		terminal_putchar(data[i]);
+        if (waitwrite) {
+            for (volatile int i = 0; i < 6000000; i++);
+        }
 }
 
 void terminal_scroll() {
-    for (int i = 0; i < VGA_HEIGHT - 1; i++) {
+    /*for (int i = 0; i < VGA_HEIGHT - 1; i++) {
         for (int j = 0; j < VGA_WIDTH; j++) {
             terminal_buffer[i * VGA_WIDTH + j] = terminal_buffer[(i + 1) * VGA_WIDTH + j];
+            if (waitwrite) {
+                for (volatile int i = 0; i < 60000000; i++);
+            }
         }
     }
     for (int j = 0; j < VGA_WIDTH; j++) {
         terminal_buffer[(VGA_HEIGHT - 1) * VGA_WIDTH + j] = vga_entry(' ', terminal_color);
+        if (waitwrite) {
+            for (volatile int i = 0; i < 60000000; i++);
+        }
     }
-    terminal_column = 2;
+    terminal_column = 0;*/
+    terminal_initialize();
 }
 
 
@@ -114,29 +207,36 @@ void terminal_writestring(const char* data)
 void terminal_newline(void)
 {
 	terminal_row += 1;
-	terminal_column = 2;
+	terminal_column = 0;
 	if (terminal_row == VGA_HEIGHT - 2) {
 		terminal_buffer = (uint16_t*) 0xB8000;
 		for (size_t y = 0; y < VGA_HEIGHT; y++) {
 			for (size_t x = 0; x < VGA_WIDTH; x++) {
 				const size_t index = y * VGA_WIDTH + x;
 				terminal_buffer[index] = vga_entry(' ', terminal_color);
+                if (waitwrite) {
+			        for (volatile int i = 0; i < 60000000; i++);
+                }
 			}
 		}
 		terminal_row = 1;
-		terminal_column = 2;
+		terminal_column = 0;
 	}
 }
 
-static inline uint16_t inw(uint16_t port) {
+uint16_t inw(uint16_t port) {
     uint16_t result;
     asm volatile ("inw %1, %0" : "=a" (result) : "Nd" (port));
     return result;
 }
 
-static inline void outw(uint16_t port, uint16_t value) {
+void outw(uint16_t port, uint16_t value) {
     asm volatile ("outw %0, %1" : : "a" (value), "Nd" (port));
 }
+
+
+bool fsinit;
+
 
 
 char* strcpy(char* dest, const char* src) {
@@ -165,14 +265,15 @@ char* strncpy(char* dest, const char* src, size_t n) {
     return original_dest;
 }
 void beep(unsigned int frequency) {
-    // Set the PIT to the desired frequency
-    unsigned int divisor = 1193180 / frequency; // PIT frequency is 1193180 Hz
-    outb(0x43, 0x36); // Command port: Set the PIT to mode 3 (square wave generator)
-    outb(0x40, divisor & 0xFF); // Low byte of divisor
-    outb(0x40, (divisor >> 8) & 0xFF); // High byte of divisor
-
     // Enable the speaker
     outb(0x61, inb(0x61) | 0x03);
+    // Set the PIT to the desired frequency
+    unsigned int divisor = 1193180 / frequency; // PIT frequency is 1193180 Hz
+    outb(0x43, 0x27); // Command port: Set the PIT to mode 3 (square wave generator)
+    outb(0x40, divisor & 0xFF); // Low byte of divisor
+    outb(0x40, (divisor >> 80) & 0xFF); // High byte of divisor
+    for (volatile int i = 0; i < 60000000; i++);
+    stop_beep();
 }
 
 void stop_beep() {
@@ -182,36 +283,108 @@ void stop_beep() {
 
 
 
+
 #define MAX_FILES 128
 #define MAX_FILENAME_LENGTH 32
 #define BLOCK_SIZE 512
 #define MAX_BLOCKS 1024
+#define MAX_MOUNTED_DRIVES 4
+
 
 typedef struct {
     char name[MAX_FILENAME_LENGTH];
     uint32_t size; // Size of the file in bytes
-    uint32_t start_block; // Starting block on disk
-} File;
+    uint32_t start_cluster; // Starting cluster on disk
+} FileEntry;
 
 typedef struct {
     uint32_t file_count;
-    File files[MAX_FILES];
+    FileEntry files[MAX_FILES];
 } Directory;
 
 typedef struct {
-    uint8_t block_allocation_table[MAX_BLOCKS]; // 0 = free, 1 = allocated
-    Directory root_directory;
-} Filesystem;
+    uint8_t jump[3];
+    char oem[8];
+    uint16_t bytes_per_sector;
+    uint8_t sectors_per_cluster;
+    uint16_t reserved_sectors;
+    uint8_t num_fats;
+    uint16_t max_root_dir_entries;
+    uint16_t total_sectors_16;
+    uint8_t media_descriptor;
+    uint16_t fat_size_16;
+    uint16_t sectors_per_track;
+    uint16_t number_of_heads;
+    uint32_t hidden_sectors;
+    uint32_t total_sectors_32;
+    uint32_t fat_size_32;
+    uint16_t flags;
+    uint16_t version;
+    uint32_t root_cluster;
+    uint16_t fsinfo_sector;
+    uint16_t backup_boot_sector;
+    uint8_t reserved[12];
+    uint8_t drive_number;
+    uint8_t reserved1;
+    uint8_t boot_signature;
+    uint32_t volume_id;
+    char volume_label[11];
+    char file_system_type[8];
+} __attribute__((packed)) FAT32BootSector;
 
-Filesystem fs;
+typedef struct {
+    bool is_mounted;
+    FAT32BootSector boot_sector;
+    uint32_t fat_start; // Start sector of the FAT
+    uint32_t data_start; // Start sector of the data area
+    Directory root_directory; // Add root directory structure
+} MountedDrive;
 
-#define DISK_PORT 0x1F0
+MountedDrive mounted_drives[MAX_MOUNTED_DRIVES];
 
+
+void read_boot_sector(uint8_t drive_number) {
+    read_block(0, &mounted_drives[drive_number].boot_sector);
+}
+
+void initialize_fat32(uint8_t drive_number) {
+    FAT32BootSector* boot_sector = &mounted_drives[drive_number].boot_sector;
+
+    // Calculate the start of the FAT and data area
+    mounted_drives[drive_number].fat_start = boot_sector->reserved_sectors;
+    mounted_drives[drive_number].data_start = boot_sector->reserved_sectors + (boot_sector->num_fats * boot_sector->fat_size_32);
+}
+
+
+bool mount_drive(uint8_t drive_number) {
+    if (drive_number >= MAX_MOUNTED_DRIVES) {
+        return false; // Invalid drive number
+    }
+
+    MountedDrive* drive = &mounted_drives[drive_number];
+    if (drive->is_mounted) {
+        return false; // Drive already mounted
+    }
+
+    // Read the boot sector
+    read_boot_sector(drive_number);
+    
+    // Initialize the FAT32 structure
+    initialize_fat32(drive_number);
+
+    drive->is_mounted = true;
+
+    terminal_newline();
+    terminal_writestring("[  OK  ] Drive mounted successfully.");
+    return true;
+}
+
+#define DISK_PORT 0x0F1
 void read_block(uint32_t block_num, void* buffer) {
     // Wait for the disk to be ready
     outb(DISK_PORT + 6, 0xE0); // Select drive
     outb(DISK_PORT + 1, 0); // Clear error register
-    outb(DISK_PORT + 2, 0); // Sector count
+    outb(DISK_PORT + 2, 1); // Sector count
     outb(DISK_PORT + 3, (block_num & 0xFF)); // LBA low
     outb(DISK_PORT + 4, (block_num >> 8) & 0xFF); // LBA mid
     outb(DISK_PORT + 5, (block_num >> 16) & 0xFF); // LBA high
@@ -230,7 +403,7 @@ void write_block(uint32_t block_num, const void* buffer) {
     // Wait for the disk to be ready
     outb(DISK_PORT + 6, 0xE0); // Select drive
     outb(DISK_PORT + 1, 0); // Clear error register
-    outb(DISK_PORT + 2, 0); // Sector count
+    outb(DISK_PORT + 2, 1); // Sector count
     outb(DISK_PORT + 3, (block_num & 0xFF)); // LBA low
     outb(DISK_PORT + 4, (block_num >> 8) & 0xFF); // LBA mid
     outb(DISK_PORT + 5, (block_num >> 16) & 0xFF); // LBA high
@@ -245,52 +418,182 @@ void write_block(uint32_t block_num, const void* buffer) {
     }
 }
 
-void write_file(const char* filename, const char* content) {
-    // Find a free block in the block allocation table
-    for (size_t i = 0; i < MAX_BLOCKS; i++) {
-        if (fs.block_allocation_table[i] == 0) {
-            // Allocate the block
-            fs.block_allocation_table[i] = 1;
+uint32_t get_cluster_address(uint32_t cluster_number, MountedDrive* drive) {
+    // Calculate the address of the cluster in the data area
+    return drive->data_start + (cluster_number - 2) * drive->boot_sector.sectors_per_cluster;
+}
 
+void read_cluster(uint32_t cluster_number, void* buffer, MountedDrive* drive) {
+    uint32_t cluster_address = get_cluster_address(cluster_number, drive);
+    for (uint32_t i = 0; i < drive->boot_sector.sectors_per_cluster; i++) {
+        read_block(cluster_address + i, (uint8_t*)buffer + (i * BLOCK_SIZE));
+    }
+}
+
+void write_cluster(uint32_t cluster_number, const void* buffer, MountedDrive* drive) {
+    uint32_t cluster_address = get_cluster_address(cluster_number, drive);
+    for (uint32_t i = 0; i < drive->boot_sector.sectors_per_cluster; i++) {
+        write_block(cluster_address + i, (const uint8_t*)buffer + (i * BLOCK_SIZE));
+    }
+}
+
+void read_root_directory(uint8_t drive_number) {
+    MountedDrive* drive = &mounted_drives[drive_number];
+    uint32_t cluster = drive->boot_sector.root_cluster;
+    FileEntry test;
+    test.name[1] = 'test';
+    drive->root_directory.files[drive->root_directory.file_count++] = test;
+
+    // Read the root directory entries starting from the root cluster
+    for (size_t i = 0; i < MAX_FILES; i++) {
+        FileEntry entry;
+        // Read the cluster into the entry (you will need to implement the logic to read the directory entries)
+        // For example, read the first cluster of the root directory
+        read_cluster(cluster, &entry, drive);
+        
+        // Check if the entry is valid (e.g., not deleted)
+        //if (entry.size > 0) {
+        //drive->root_directory.files[drive->root_directory.file_count++] = entry;
+        //printf(test.name[1]);
+        //}
+        
+        // Move to the next entry (you will need to implement the logic to find the next entry)
+    }
+}
+
+#define FAT_ENTRY_SIZE 4 // FAT32 uses 32-bit entries
+
+void read_fat_table(uint32_t* fat_table, MountedDrive* drive) {
+    uint32_t fat_start = drive->fat_start;
+    for (uint32_t i = 0; i < (drive->boot_sector.fat_size_32 * drive->boot_sector.num_fats); i++) {
+        read_block(fat_start + i, (uint8_t*)&fat_table[i * BLOCK_SIZE / FAT_ENTRY_SIZE]);
+    }
+}
+
+
+bool is_cluster_free(uint32_t cluster_number, uint32_t* fat_table) {
+    return (fat_table[cluster_number] == 0);
+}
+
+
+uint32_t find_free_cluster(MountedDrive* drive) {
+    uint32_t fat_table[BLOCK_SIZE / FAT_ENTRY_SIZE]; // Adjust size as needed
+    read_fat_table(fat_table, drive); // Read the FAT table into memory
+
+    // Iterate through the FAT table to find a free cluster
+    for (uint32_t i = 2; i < (drive->boot_sector.total_sectors_32 / drive->boot_sector.sectors_per_cluster); i++) {
+        if (is_cluster_free(i, fat_table)) {
+            return i; // Return the first free cluster found
+        }
+    }
+    return 0; // No free cluster found
+}
+
+
+void write_file(uint8_t drive_number, const char* filename, const char* content) {
+    MountedDrive* drive = &mounted_drives[drive_number];
+
+    // Find a free entry in the root directory
+    for (size_t i = 0; i < MAX_FILES; i++) {
+        if (drive->root_directory.files[i].size == 0) { // Assuming size 0 means free
             // Create the file entry
-            File new_file;
-            strcpy(new_file.name, filename);
+            FileEntry new_file;
+            strncpy(new_file.name, filename, MAX_FILENAME_LENGTH);
             new_file.size = strlen(content);
-            new_file.start_block = i;
+            new_file.start_cluster = find_free_cluster(drive); // Find a free cluster
 
-            // Write the file content to the allocated block
+            // Write the file content to the allocated cluster
             char buffer[BLOCK_SIZE] = {0};
             strncpy(buffer, content, BLOCK_SIZE);
-            write_block(i, buffer);
+            write_cluster(new_file.start_cluster, buffer, drive);
+
+            // Update the FAT table to mark the cluster as used
+            update_fat_entry(new_file.start_cluster, 0xFFFFFFFF, drive); // Mark as end of file (EOF)
 
             // Add the file to the root directory
-            fs.root_directory.files[fs.root_directory.file_count++] = new_file;
+            drive->root_directory.files[drive->root_directory.file_count++] = new_file;
 
-            // Write the updated directory and allocation table back to disk
-            write_block(0, &fs.root_directory);
-            write_block(1, fs.block_allocation_table);
             return;
         }
     }
 }
 
-void read_file(const char* filename) {
-    for (size_t i = 0; i < fs.root_directory.file_count; i++) {
-        if (strcmp(fs.root_directory.files[i].name, filename) == 0) {
+void update_fat_entry(uint32_t cluster_number, uint32_t value, MountedDrive* drive) {
+    uint32_t fat_table[BLOCK_SIZE / FAT_ENTRY_SIZE];
+    read_fat_table(fat_table, drive); // Read the FAT table into memory
+
+    // Update the FAT entry for the specified cluster
+    fat_table[cluster_number] = value;
+
+    // Write the updated FAT table back to disk
+    uint32_t fat_start = drive->fat_start;
+    write_block(fat_start + (cluster_number * FAT_ENTRY_SIZE / BLOCK_SIZE), fat_table);
+}
+
+
+void read_file(uint8_t drive_number, const char* filename) {
+    MountedDrive* drive = &mounted_drives[drive_number];
+
+    for (size_t i = 0; i < drive->root_directory.file_count; i++) {
+        if (strcmp(drive->root_directory.files[i].name, filename) == 0) {
+            FileEntry* file = &drive->root_directory.files[i];
             char buffer[BLOCK_SIZE] = {0};
-            read_block(fs.root_directory.files[i].start_block, buffer);
+
+            // Read the file content from the allocated cluster
+            read_cluster(file->start_cluster, buffer, drive);
             terminal_writestring(buffer);
             return;
         }
     }
 }
 
-void filesystem_initialize() {
-    // Read the root directory and block allocation table from disk
-    read_block(0, &fs.root_directory); // Assuming the root directory is at block 0
-    read_block(1, fs.block_allocation_table); // Assuming the block allocation table is at block 1
+char *strchr(const char *s, int c) {
+    while (*s != '\0') {
+        if (*s == (char)c) {
+            return (char *)s; // Return a pointer to the first occurrence
+        }
+        s++;
+    }
+    return NULL; // Return NULL if the character is not found
 }
 
+
+char *strtok(char *str, const char *delim) {
+    static char *last = NULL; // Static variable to hold the last token
+    char *current_token;
+
+    // If str is NULL, continue tokenizing the last string
+    if (str == NULL) {
+        str = last;
+    }
+
+    // Skip leading delimiters
+    while (*str && strchr(delim, *str)) {
+        str++;
+    }
+
+    // If we reached the end of the string, return NULL
+    if (*str == '\0') {
+        last = NULL;
+        return NULL;
+    }
+
+    // Find the end of the token
+    current_token = str;
+    while (*str && !strchr(delim, *str)) {
+        str++;
+    }
+
+    // Null-terminate the token
+    if (*str) {
+        *str = '\0'; // Replace delimiter with null terminator
+        last = str + 1; // Save the position for the next call
+    } else {
+        last = NULL; // No more tokens
+    }
+
+    return current_token; // Return the current token
+}
 
 const char keyboard_layout[128] = {
     0, 0, '1', '2', '3', '4', '5', '6', '7', '8', '9', '0', '-', '=', '\b',
@@ -320,38 +623,35 @@ uint8_t read_keyboard() {
     return 0;
 }
 
-int strncmp(const char *s1, const char *s2, size_t n) {
-    while (n--) {
-        if (*s1 != *s2) {
-            return (*(unsigned char *)s1 < *(unsigned char *)s2) ? -1 : 1;
-        }
-        if (*s1 == '\0') {
-            return 0;
-        }
-        s1++;
-        s2++;
-    }
-    return 0;
-}
+
 
 void handle_keyboard_input() {
     uint8_t data = read_keyboard();
     if (data == 0) {
         return;
     }
-
+    input_buffer[input_buffer_index] = '\0';
     if (data == '\b') {
-        if (terminal_column > 0) {
+        if (terminal_column > 15) {
             terminal_column--;
             input_buffer_index -= 1;
             terminal_putentryat(' ', terminal_color, terminal_column, terminal_row);
         }
     } else {
-        if (data == '\n') {
-            input_buffer[input_buffer_index] = '\0'; // Null-terminate the input
+        if (data == '\n') { // Null-terminate the input
             if (strcmp(input_buffer, "ls") == 0) {
 				terminal_newline();
-				printf("Filesystem support has not been added yet.");
+				if (fsinit != true) {
+					panic("FS NOT INIT!");
+				} else {
+					read_root_directory(3);
+					//printf(mounted_drives[1].fs.root_directory.file_count);
+					//for (size_t i = 0; i < mounted_drives[1].fs.root_directory.file_count; i++) {
+					//	terminal_writestring("File or dir: ");
+            		//	terminal_writestring(mounted_drives[1].fs.root_directory.files[i].name);
+					//	terminal_newline();
+        			//}
+				}
 			//} else if (strncmp(input_buffer, "cat ", 4) == 0) {
             //    read_file(input_buffer + 4); // Read file command
             //} else if (strncmp(input_buffer, "echo ", 5) == 0) {
@@ -362,6 +662,13 @@ void handle_keyboard_input() {
             //    } else {
             //        terminal_writestring("Usage: echo <filename> <content>\n");
             //    }
+            } else if (strcmp(input_buffer, "ppm") == 0) {
+                terminal_newline();
+                terminal_writestring("PotatoOS Package Manager");
+                terminal_newline();
+                terminal_writestring("Usage ppm [install][remove][update] [package name]");
+                terminal_newline();
+                terminal_writestring("This is a placeholder.");
 			} else if (strcmp(input_buffer, "help") == 0) {
 				terminal_newline();
 				printf("PotatoOS ");
@@ -370,28 +677,74 @@ void handle_keyboard_input() {
 				printf(subversion);
 				terminal_newline();
 				terminal_newline();
-				printf("Test");
+				printf("help        - ppm.");
+				terminal_newline();
+				printf("clear       - panic.");
+				terminal_newline();
+				printf("reboot      - g.");
+				terminal_newline();
+				printf("fatinit     - shutdown.");
+				terminal_newline();
+				printf("color       - ls.");
+				terminal_newline();
+				printf("echo        - cat.");
+				terminal_newline();
+				printf("waitwrite   - ld.");
 			} else if (strcmp(input_buffer, "clear") == 0) {
-				terminal_buffer = (uint16_t*) 0xB8000;
+				/*terminal_buffer = (uint16_t*) 0xB8000;
 				for (size_t y = 0; y < VGA_HEIGHT; y++) {
 					for (size_t x = 0; x < VGA_WIDTH; x++) {
 						const size_t index = y * VGA_WIDTH + x;
 						terminal_buffer[index] = vga_entry(' ', terminal_color);
 					}
 				}
-				terminal_row = 1;
-				terminal_column = 2;
-			} else if (strcmp(input_buffer, "fsinit") == 0) {
-				terminal_newline();
-				terminal_writestring("[   ] Initialize filesystem...");
-				filesystem_initialize();
+				terminal_row = 1; */
+	            terminal_initialize();
+				//terminal_column = 2;
+			//} else if (strcmp(input_buffer, "fsinit") == 0) {
+			//	filesystem_initialize();
 			} else if (strcmp(input_buffer, "panic") == 0) {
 				panic("User called panic.");
-            } else {
+			} else if (strcmp(input_buffer, "reboot") == 0) {
+				reboot();
+            } else if (strcmp(input_buffer, "g") == 0) {
+                outb(0x3D4, 0x0A);
+                outb(0x3D5, 0x02);
+                set_vga_mode();
+            } else if (strcmp(input_buffer, "fatinit") == 0) {
+                terminal_newline();
+                terminal_writestring("[      ] Attempting to initialize FAT...");
+                if (mainfat() == 0) {
+                    fsinit = true;
+                } else {
+                    fsinit = false;
+                }
+            } else if (strcmp(input_buffer, "waitwrite") == 0) {
+                waitwrite = true;
+			} else if (strcmp(input_buffer, "shutdown") == 0) {
+				shutdown();
+            } else if (strcmp(input_buffer, "color") == 0) {
+                outb(0x3D4, 0x0A);
+                outb(0x3D5, 0x20);
+                for (size_t y = 0; y < VGA_HEIGHT; y++) {
+                    for (size_t x = 0; x < VGA_WIDTH; x++) {
+                        const size_t index = y * VGA_WIDTH + x;
+                        terminal_buffer[index] = vga_entry(' ', terminal_color);
+                        for (volatile int i = 0; i < 600000; i++);
+                        terminal_color = vga_entry_color(VGA_COLOR_BLACK, x); 
+                    }
+				    beep(y);
+                }
+                terminal_color = vga_entry_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK); 
+                outb(0x3D4, 0x0A);
+                outb(0x3D5, 0x02);
+            } else if (input_buffer_index != 0) {
             	terminal_newline();
-				beep(440);
 				char* command = input_buffer;
-                printf("Unknown command.");
+                printf("'");
+                printf(input_buffer);
+                printf("'");
+                printf(" unknown command or file name.");
             }
             terminal_newline();
             terminal_writestring(username);
@@ -411,13 +764,55 @@ void handle_keyboard_input() {
 
 const bool load_ahci_driver = false;
 
+#define RAM_START 0x00000000 
+#define RAM_END   0x00003030
+#define DUMP_SIZE 4
+
+bool networkinit;
+
 void panic(char* msg) 
 {
-	terminal_newline();
+    outb(0x3D4, 0x0A);
+    outb(0x3D5, 0x20);
+	terminal_writestring("PANIC!!!");
+	terminal_color = vga_entry_color(VGA_COLOR_BLACK, VGA_COLOR_LIGHT_GREY); 
+    terminal_buffer = (uint16_t*) 0xB8000;
+    for (size_t y = 0; y < VGA_HEIGHT; y++) {
+        for (size_t x = 0; x < VGA_WIDTH; x++) {
+            const size_t index = y * VGA_WIDTH + x;
+            terminal_buffer[index] = vga_entry(' ', terminal_color);
+			for (volatile int i = 0; i < 600000; i++);
+        }
+		beep(7040);
+    }
+    waitwrite = true;
+    terminal_row = 1;
+    terminal_newline();
+	terminal_writestring("An error occurred and the system has been shutdown."); // ***The cake is a lie***
+    terminal_newline();
+	terminal_writestring("Contact me at ospotato3@gmail.com with the error message below, and anything you where doing before this happened.");
+    terminal_newline();
+	terminal_writestring("Github: https://github.com/winvistalover/PotatoOS/tree/nightly");
+    terminal_newline();
+    terminal_newline();
+	terminal_writestring("Panic: ");
 	terminal_writestring(msg);
 	terminal_newline();
-	terminal_writestring("Kernel panic!");
-	__asm__("hlt");
+	terminal_writestring("Kernel: ");
+	terminal_writestring(osname);
+	terminal_writestring(" ");
+	terminal_writestring(version);
+	terminal_writestring(".");
+	terminal_writestring(subversion);
+	terminal_newline();
+    terminal_newline();
+    terminal_newline();
+
+    //terminal_writestring("The system will automatically reboot.");
+    //for (volatile int i = 0; i < 600000000; i++);
+    //reboot();
+
+    __asm__("hlt");
 }
 
 //void basic_vga_driver() 
@@ -429,38 +824,325 @@ void panic(char* msg)
 //    );
 //}
 
+//#define VGA_ADDRESS 0xB8000
+//#define VGA_WIDTH 80
+//#define VGA_HEIGHT 25
+
+// VGA I/O ports
+//#define VGA_CTRL_REGISTER 0x3D4
+//#define VGA_DATA_REGISTER 0x3D5
+
+
+uint32_t htonl(uint32_t hostlong) {
+    return ((hostlong & 0xFF000000) >> 24) |
+           ((hostlong & 0x00FF0000) >> 8)  |
+           ((hostlong & 0x0000FF00) << 8)  |
+           ((hostlong & 0x000000FF) << 24);
+}
+
+// Convert 16-bit integer from host to network byte order
+uint16_t htons(uint16_t hostshort) {
+    return (hostshort >> 8) | (hostshort << 8);
+}
+
+// Define network structures
+struct ip_header {
+    uint8_t  version_ihl;
+    uint8_t  type_of_service;
+    uint16_t total_length;
+    uint16_t identification;
+    uint16_t flags_fragment_offset;
+    uint8_t  time_to_live;
+    uint8_t  protocol;
+    uint16_t header_checksum;
+    uint32_t source_address;
+    uint32_t destination_address;
+};
+
+struct icmp_header {
+    uint8_t  type;
+    uint8_t  code;
+    uint16_t checksum;
+    uint16_t identifier;
+    uint16_t sequence_number;
+};
+
+// Function to calculate checksum
+uint16_t checksum(void *data, size_t len) {
+    uint32_t sum = 0;
+    uint16_t *ptr = (uint16_t *)data;
+    for (size_t i = 0; i < len / 2; i++) {
+        sum += *ptr++;
+    }
+    if (len % 2) {
+        sum += *(uint8_t *)ptr;
+    }
+    while (sum >> 16) {
+        sum = (sum & 0xFFFF) + (sum >> 16);
+    }
+    return ~sum;
+}
+
+// Function to send data through the network controller
+void network_send(uint8_t *packet, size_t length) {
+    // Example I/O port addresses for the Intel PRO/100 VE
+    uint16_t io_base = 0x1000; // This should be the actual I/O base address of your network card
+
+    // Write the packet to the transmit buffer
+    for (size_t i = 0; i < length; i++) {
+        outb(io_base + i, packet[i]);
+    }
+
+    // Trigger the transmission
+    outb(io_base + 0x10, 0x01); // Example command to start transmission
+}
+
+// Function to receive data from the network controller
+size_t network_receive(uint8_t *buffer, size_t max_length) {
+    // Example I/O port addresses for the Intel PRO/100 VE
+    uint16_t io_base = 0x1500; // This should be the actual I/O base address of your network card
+
+    // Check if data is available
+    if (inb(io_base + 0x20) & 0x01) { // Example status register check
+        size_t length = inb(io_base + 0x24); // Example length register
+        if (length > max_length) {
+            length = max_length;
+        }
+
+        // Read the packet from the receive buffer
+        for (size_t i = 0; i < length; i++) {
+            buffer[i] = inb(io_base + i);
+        }
+
+        return length;
+    }
+
+    return 0; // No data received
+}
+
+// Function to send ICMP echo request (ping)
+void send_ping(uint32_t dest_ip) {
+    struct ip_header ip;
+    struct icmp_header icmp;
+    uint8_t packet[sizeof(ip) + sizeof(icmp)];
+
+    // Fill IP header
+    ip.version_ihl = 0x45;
+    ip.type_of_service = 0;
+    ip.total_length = htons(sizeof(ip) + sizeof(icmp));
+    ip.identification = 0;
+    ip.flags_fragment_offset = 0;
+    ip.time_to_live = 64;
+    ip.protocol = 0; // ICMP
+    ip.header_checksum = 0;
+    ip.source_address = htonl(0xC0A80001); // 192.168.0.1
+    ip.destination_address = htonl(dest_ip);
+    ip.header_checksum = checksum(&ip, sizeof(ip));
+
+    // Fill ICMP header
+    icmp.type = 8; // Echo request
+    icmp.code = 0;
+    icmp.checksum = 0;
+    icmp.identifier = htons(1);
+    icmp.sequence_number = htons(1);
+    icmp.checksum = checksum(&icmp, sizeof(icmp));
+
+    // Copy headers to packet
+    memcpy(packet, &ip, sizeof(ip));
+    memcpy(packet + sizeof(ip), &icmp, sizeof(icmp));
+
+    printf(htonl(0xC0A80001));
+    // Send packet
+    network_send(packet, sizeof(packet));
+}
+
+// Function to receive ICMP echo reply (ping response)
+void receive_ping() {
+    uint8_t buffer[1500];
+    size_t len = network_receive(buffer, sizeof(buffer));
+
+    struct ip_header *ip = (struct ip_header *)buffer;
+    struct icmp_header *icmp = (struct icmp_header *)(buffer + sizeof(struct ip_header));
+
+    if (icmp->type == 0 && icmp->code == 0) { // Echo reply
+        // Process the reply (e.g., print success message)
+        terminal_newline();
+        terminal_writestring("[  OK  ] Attempting to ping 192.168.0.2...");
+        networkinit = true;
+    } else {
+        terminal_newline();
+        terminal_writestring("[ FAIL ] Attempting to ping 192.168.0.2...");
+        terminal_newline();
+        networkinit = false;
+
+    }
+    terminal_newline();
+    terminal_putchar(icmp->code);
+    terminal_newline();
+    terminal_putchar(icmp->type);
+}
+
+void int32(uint8_t intnum, uint16_t ax, uint16_t bx, uint16_t cx, uint16_t dx, uint16_t *ax_out) {
+    asm volatile (
+        "int $0x10"
+        : "=a"(*ax_out)
+        : "a"(ax), "b"(bx), "c"(cx), "d"(dx)
+    );
+}
+
+
+#define VESA_SIGNATURE 0x4F56
+#define VESA_GET_INFO 0x4F00
+#define VESA_SET_MODE 0x4F02
+#define VESA_MODE_INFO 0x4F01
+
+typedef struct {
+    uint16_t mode_attributes;
+    uint8_t win_a_attributes;
+    uint8_t win_b_attributes;
+    uint16_t win_granularity;
+    uint16_t win_size;
+    uint16_t win_a_segment;
+    uint16_t win_b_segment;
+    uint32_t win_func_ptr;
+    uint16_t bytes_per_scanline;
+    uint16_t x_resolution;
+    uint16_t y_resolution;
+    uint8_t x_char_size;
+    uint8_t y_char_size;
+    uint8_t number_of_planes;
+    uint8_t bits_per_pixel;
+    uint8_t number_of_banks;
+    uint8_t bank_size;
+    uint8_t number_of_image_pages;
+    uint8_t reserved;
+    uint8_t direct_color_mode_info;
+    uint32_t phys_base_ptr;
+    uint32_t off_screen_mem_offset;
+    uint16_t off_screen_mem_size;
+} __attribute__((packed)) vesa_mode_info_t;
+
+uint16_t vesa_get_info() {
+    uint16_t ax = VESA_GET_INFO;
+    uint16_t result;
+
+    asm volatile (
+        "int $0x10"
+        : "=a"(result)
+        : "a"(ax)
+        : "cc"
+    );
+
+    return result;
+}
+
+uint16_t vesa_set_mode(uint16_t mode) {
+    uint16_t ax = VESA_SET_MODE;
+    uint16_t bx = mode | 0x4000; // Set bit 14 for linear framebuffer
+    uint16_t result;
+
+    asm volatile (
+        "int $0x10"
+        : "=a"(result)
+        : "a"(ax), "b"(bx)
+        : "cc"
+    );
+
+    return result;
+}
+void set_vga_mode() {
+    /* // Set VGA mode to 80x25 text mode
+    //outb(0x3D4, 0x0A); outb(0x3D5, 0x20); // Cursor start
+    //outb(0x3D4, 0x0B); outb(0x3D5, 0x0F); // Cursor end
+    outb(0x3D4, 0x0C); outb(0x3D5, 0x00); // Start address high
+    outb(0x3D4, 0x0D); outb(0x3D5, 0x00); // Start address low
+    outb(0x3D4, 0x09); outb(0x3D5, 0x10); // Maximum scan line
+    outb(0x3D4, 0x14); outb(0x3D5, 0x20); // Underline location
+    outb(0x3D4, 0x07); outb(0x3D5, 0xFFFFFFFF); // Vertical display end
+    outb(0x3D4, 0x12); outb(0x3D5, 0xFFFFF); // Vertical retrace start
+    outb(0x3D4, 0x20); outb(0x3D5, 0xFF); // Vertical retrace start
+    outb(0x3D4, 0x17); outb(0x3D5, 0xA3); // Mode control 
+
+    outb(0x3C4, 0x12); // set mode control register
+    outb(0x3C5, 0x40); // set mode control register value
+    outb(0x3C4, 0x10); // set horizontal total register
+    outb(0x3C5, 0x40); // set horizontal total value
+    outb(0x3C4, 0x11); // set horizontal total high byte register
+    outb(0x3C5, 0x04); // set horizontal total high byte value
+    outb(0x3C4, 0x16); // set vertical total register
+    outb(0x3C5, 0x13); // set vertical total value
+    outb(0x3C4, 0x17); // set vertical total high byte register
+    outb(0x3C5, 0x03); // set vertical total high byte value
+    outb(0x3C4, 0x12); // set mode control register
+    outb(0x3C5, 0x60); // set mode control register value*/
+    terminal_newline();
+    terminal_writestring("[      ] Set VESA mode...");
+    for (volatile int i = 0; i < 60000000; i++);
+    uint16_t mode = 0x100; // VESA mode for 800x600x32
+    uint16_t result = vesa_set_mode(mode);
+
+    if (result != 0x004F) {
+        panic("Failed to set VESA mode");
+        return; 
+    }
+}
+
 void kernel_main(void) 
 {
 	/* Initialize terminal interface */
+    waitwrite = true;
 	terminal_initialize();
-	terminal_row = 23;
-	terminal_color = vga_entry_color(VGA_COLOR_BLACK, VGA_COLOR_WHITE);
-	terminal_writestring(" help = help   ls = list   rm = delete   cd = change dir                    ");
-	terminal_color = vga_entry_color(VGA_COLOR_LIGHT_GREEN, VGA_COLOR_LIGHT_BLUE);
+    outb(0x3D4, 0x0A);
+    outb(0x3D5, 0x02);
+
+
+
+	//terminal_row = 23;
+	//terminal_color = vga_entry_color(VGA_COLOR_BLACK, VGA_COLOR_WHITE);
+	//terminal_writestring(" help = help   ls = list   rm = delete   cd = change dir                    ");
+	terminal_color = vga_entry_color(VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK);
 	terminal_row = 1;
-	terminal_column = 2;
-    	terminal_writestring("Welcome to ");
-    	terminal_writestring(osname);
-    	terminal_writestring(" ");
-    	terminal_writestring(version);
-    	terminal_writestring(".");
-    	terminal_writestring(subversion);
-    	terminal_writestring("!");
+	//terminal_column = 2;
+    terminal_writestring("Welcome to ");
+    terminal_writestring(osname);
+    terminal_writestring(" ");
+    terminal_writestring(version);
+    terminal_writestring(".");
+    terminal_writestring(subversion);
+    terminal_writestring("!");
 	terminal_newline();
-	terminal_color = vga_entry_color(VGA_COLOR_CYAN, VGA_COLOR_LIGHT_BLUE); 
+	terminal_color = vga_entry_color(VGA_COLOR_CYAN, VGA_COLOR_BLACK); 
 	terminal_writestring("WARNING: PotatoOS is in alpha! I am NOT responsible for ANY data loss.");
 
-	terminal_color = vga_entry_color(VGA_COLOR_WHITE, VGA_COLOR_LIGHT_BLUE);
+	terminal_color = vga_entry_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
 	terminal_newline();	
+    terminal_newline();
+    terminal_writestring("[      ] Attempting to initialize FAT...");
+    //if (mainfat() == 0) {
+    //    fsinit = true;
+    //}
+    
+    fsinit = true; // FAT driver is broken. Set fsinit to true.
+    
+    terminal_newline();
+    terminal_writestring("[      ] Attempting to ping ???.???.???.???...");
+    uint32_t dest_ip = 0xC0A80002; // 192.168.0.2
+    send_ping(dest_ip);
+    receive_ping();
 
-
+    mainfat();
 	
+    waitwrite = false;
+
 	terminal_newline();
 	terminal_writestring(username);
 	terminal_writestring("@");
 	terminal_writestring(hostname);
 	terminal_writestring(" /> ");	
 	while (1) {
+            if (!networkinit && !fsinit) {
+                panic("Kernel couldn't load necessary modules!");
+            }
         	handle_keyboard_input();
     	}
 
