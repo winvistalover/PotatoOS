@@ -58,7 +58,7 @@ potatoos.kernel: $(OBJS) $(ARCHDIR)/linker.ld
 	$(CC) -T $(ARCHDIR)/linker.ld -o $@ $(CFLAGS) $(LINK_LIST)
 	grub-file --is-x86-multiboot potatoos.kernel
 
-$(ARCHDIR)/crtbegin.o $(ARCHDIR)/crtend.o:
+$(ARCHDIR)/crtbegin.o $(ARCHDIR)/crtend.o kernel/arch/i386/switch.o:
 	OBJ=`$(CC) $(CFLAGS) $(LDFLAGS) -print-file-name=$(@F)` && cp "$$OBJ" $@
 
 .c.o:
