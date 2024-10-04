@@ -4,6 +4,8 @@
 #include <stdio.h>
 #include <string.h>
 
+#define	EOF	(-1)
+
 static bool print(const char* data, size_t length) {
 	const unsigned char* bytes = (const unsigned char*) data;
 	for (size_t i = 0; i < length; i++)
@@ -49,6 +51,10 @@ int printf(const char* restrict format, ...) {
 			}
 			if (!print(&c, sizeof(c)))
 				return -1;
+			written++;
+		} else if (*format == 'n') {
+			format++;
+			terminal_newline();
 			written++;
 		} else if (*format == 's') {
 			format++;
