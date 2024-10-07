@@ -20,12 +20,62 @@
 
 #define UART0_BASE 0x101f0000
 
+typedef	int		fpos_t;
+
+struct __sbuf {
+	unsigned char *_base;
+	int	_size;
+};
+
+struct __sFILE {
+	unsigned char *_p;	/* (*) current position in (some) buffer */
+	int	_r;		/* (*) read space left for getc() */
+	int	_w;		/* (*) write space left for putc() */
+	short	_flags;		/* (*) flags, below; this FILE is free if 0 */
+	short	_file;		/* (*) fileno, if Unix descriptor, else -1 */
+	struct	__sbuf _bf;	/* (*) the buffer (at least 1 byte, if !NULL) */
+	int	_lbfsize;	/* (*) 0 or -_bf._size, for inline putc */
+
+	/* operations */
+	void	*_cookie;	/* (*) cookie passed to io functions */
+	int	(*_close)(void *);
+	int	(*_read)(void *, char *, int);
+	fpos_t	(*_seek)(void *, fpos_t, int);
+	int	(*_write)(void *, const char *, int);
+
+	/* separate buffer for long sequences of ungetc() */
+	struct	__sbuf _ub;	/* ungetc buffer */
+	unsigned char	*_up;	/* saved _p when _p is doing ungetc data */
+	int	_ur;		/* saved _r when _r is counting ungetc data */
+
+	/* tricks to meet minimum requirements even when malloc() fails */
+	unsigned char _ubuf[3];	/* guarantee an ungetc() buffer */
+	unsigned char _nbuf[1];	/* guarantee a getc() buffer */
+
+	/* separate buffer for fgetln() when line crosses buffer boundary */
+	struct	__sbuf _lb;	/* buffer for fgetln() */
+
+	/* Unix stdio files get aligned to block boundaries on fseek() */
+	int	_blksize;	/* stat.st_blksize (may be != _bf._size) */
+	fpos_t	_offset;	/* current lseek offset */
+
+	struct pthread_mutex *_fl_mutex;	/* used for MT-safety */
+	struct pthread *_fl_owner;	/* current owner */
+	int	_fl_count;	/* recursive lock count */
+	int	_orientation;	/* orientation for fwide() */
+	//__mbstate_t _mbstate;	/* multibyte conversion state */
+};
+
+typedef struct __sFILE FILE;
+
 volatile uint32_t * const UART0DR = (uint32_t *) (UART0_BASE + 0x00);
 volatile uint32_t * const UART0FR = (uint32_t *) (UART0_BASE + 0x18);
 volatile uint32_t * const UART0IBRD = (uint32_t *) (UART0_BASE + 0x24);
 volatile uint32_t * const UART0FBRD = (uint32_t *) (UART0_BASE + 0x28);
 volatile uint32_t * const UART0LCRH = (uint32_t *) (UART0_BASE + 0x2C);
 volatile uint32_t * const UART0CR = (uint32_t *) (UART0_BASE + 0x30);
+
+bool noprint;
 
 void uart_init() {
     // Disable UART0
@@ -72,7 +122,7 @@ static inline char* hostname = "live";
 
 #define MAX_EVENTS 10000
 
-char* eventlog[MAX_EVENTS] = {"test"};
+char* eventlog[MAX_EVENTS];
 int size = 1;
 
 enum taskstate {
@@ -96,26 +146,29 @@ size_t strlen(const char* str)
 	return len;
 }
 char* task(char* name, int state) {
-    terminal_newline();
     addevent(state);
     addevent(name);
-    if (state == 0) {
-        terminal_writestring("[      ] ");
-        terminal_writestring(name);
-    } else if (state == 1) {
-        terminal_writestring("[  ");
-        terminal_color = vga_entry_color(VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK);
-        terminal_writestring("OK");
-        terminal_color = vga_entry_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
-        terminal_writestring("  ] ");
-        terminal_writestring(name);
-    } else if (state == 2) {
-        terminal_writestring("[ ");
-        terminal_color = vga_entry_color(VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
-        terminal_writestring("FAIL");
-        terminal_color = vga_entry_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
-        terminal_writestring(" ] ");
-        terminal_writestring(name);
+    if (!noprint) {
+        terminal_newline();
+        //terminal_column = 10;
+        if (state == 0) {
+            terminal_writestring("[      ] ");
+            terminal_writestring(name);
+        } else if (state == 1) {
+            terminal_writestring("[  ");
+            terminal_color = vga_entry_color(VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK);
+            terminal_writestring("OK");
+            terminal_color = vga_entry_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
+            terminal_writestring("  ] ");
+            terminal_writestring(name);
+        } else if (state == 2) {
+            terminal_writestring("[ ");
+            terminal_color = vga_entry_color(VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
+            terminal_writestring("FAIL");
+            terminal_color = vga_entry_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
+            terminal_writestring(" ] ");
+            terminal_writestring(name);
+        }
     }
 }
 
@@ -187,9 +240,9 @@ void terminal_initialize(void)
 		}
 	}
 
-	terminal_color = vga_entry_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
+
 	terminal_buffer = (uint16_t*) 0xB8000;
-	for (size_t y = 0; y < VGA_HEIGHT; y++) {
+	for (size_t y = 0; y < VGA_HEIGHT - 20; y++) {
 		for (size_t x = 0; x < VGA_WIDTH; x++) {
 			const size_t index = y * VGA_WIDTH + x;
 			terminal_buffer[index] = vga_entry(' ', terminal_color);
@@ -340,7 +393,7 @@ void beep(unsigned int frequency) {
     outb(0x61, inb(0x61) | 0x03);
     // Set the PIT to the desired frequency
     unsigned int divisor = 1193180 / frequency; // PIT frequency is 1193180 Hz
-    outb(0x43, 0x27); // Command port: Set the PIT to mode 3 (square wave generator)
+    outb(0x43, 0x28); // Command port: Set the PIT to mode 3 (square wave generator)
     outb(0x40, divisor & 0xFF); // Low byte of divisor
     outb(0x40, (divisor >> 80) & 0xFF); // High byte of divisor
     for (volatile int i = 0; i < 600000000; i++);
@@ -676,8 +729,8 @@ const char keyboard_layout[128] = {
     'Z', 'X', 'C', 'V', 'B', 'N', 'M', '<', '>', '/', '|' 
 };
 
-uint8_t read_keyboard() {
-    uint8_t data;
+uint16_t read_keyboard() {
+    uint16_t data;
     while ((inb(0x64) & 0x01) == 0) {
         // Wait for data to be available
     }
@@ -769,6 +822,10 @@ unsigned char hour;
 unsigned char day;
 unsigned char month;
 unsigned int year;
+FILE stdin;
+FILE stdout;
+FILE stderr;
+
 
 
 enum {
@@ -1175,7 +1232,8 @@ int paniccolor = 8;
 
 void panic(char* msg) 
 {
-    
+    panicwind();
+	for (volatile int i = 0; i < 600000000; i++);
 	beep(7040);
     outb(0x3D4, 0x0A);
     outb(0x3D5, 0x20);
@@ -1428,13 +1486,17 @@ void setup_paging() {
     for (int i = 0; i < 1024; i++) {
         page_directory[i] = 0x00000002; // Not present
         page_table[i] = (i * PAGE_SIZE) | 3; // Present, R/W, User
-        printf(".");
+        if (!noprint) {
+            printf(".");
+        }
     }
     task("Initialize page directory and page table...", 1);
     // Map the framebuffer
     task("Map the framebuffer...", 0);
     for (int i = 0; i < (FRAMEBUFFER_SIZE / PAGE_SIZE); i++) {
-        printf(".");
+        if (!noprint) {
+            printf(".");
+        }
         page_table[(FRAMEBUFFER_ADDRESS / PAGE_SIZE) + i] = (FRAMEBUFFER_ADDRESS + (i * PAGE_SIZE)) | 3;
     }
     task("Map the framebuffer...", 1);
@@ -1685,17 +1747,24 @@ uint16_t get_cursor_position(void)
     return pos;
 }
 
+int wait(int num) {
+    int waitnum = num * 1000000;
+    for (volatile int i = 0; i < waitnum; i++);
+    return 0;
+}
+
 void set_vga_mode() {
     //terminal_initialize();
     task("Stop for 6000000...", 0);
-    for (volatile int i = 0; i < 6000000; i++);
+    //for (volatile int i = 0; i < 6000000; i++);
+    wait(6);
     task("Set VESA mode number...", 0);
-    //outb(0x3C4, 0x4F01);
-    //outb(0x3C5, 0x101); // Set VESA mode number
+    outb(0x3C4, 0x4F01);
+    outb(0x3C5, 0x101); // Set VESA mode number
     task("Set VESA mode number...", 2);
     task("Switch to 800x600x16 mode...", 0);
-    //outb(0x3C4, 0x4F02);
-    //outb(0x3C5, 0x101); // Switch to 800x600x16 mode
+    outb(0x3C4, 0x4F02);
+    outb(0x3C5, 0x101); // Switch to 800x600x16 mode
     task("Switch to 800x600x16 mode...", 2);
     task("Change cursor", 0);
     outb(0x3D4, 0x0A);
@@ -1707,23 +1776,23 @@ void set_vga_mode() {
     // Ensure the framebuffer address is correct for the mode
 
     task("Stop for 6000000...", 0);
-    for (volatile int i = 0; i < 60000000; i++);
+    wait(6);
     task("Stop for 6000000...", 1);
-    //for (int i = 0; i < 800 * 600; i++) {
+    for (int i = 0; i < 800 * 600; i++) {
         //for (volatile int i = 0; i < 6000; i++);
         //draw_vertical_line(i,i + 10,i + 20, 0xFF);
        //draw_string(framebuffer, 100, 100, "testaaaaaaaaaaaaaaaaaaaaaaa");
-    //    framebuffer[i] = 0x3F; // Clear to black
+        framebuffer[i] = 0x33; // Clear to black
      //   //terminal_newline();
-    //}
+    }
 
-    //while (1) {
-    //    printf(".");
-    //    int d = 0;
-    //    d += 1;
-      //  framebuffer[d] = 0x00;
+    while (1) {
+        printf(".");
+        int d = 0;
+        d += 1;
+       framebuffer[d] = 0x00;
         //for (volatile int i = 0; i < 6000; i++);
-    //}
+    }
 }
 
 
@@ -1771,12 +1840,239 @@ int fixflash() {
     }
 }
 
-int displayscreen() {
-    terminal_color = vga_entry_color(VGA_COLOR_WHITE, paniccolor); 
+int drawbg() {
     terminal_buffer = (uint16_t*) 0xB8000;
-    input_buffer_index = 0;
+    for (size_t y = 0; y < VGA_HEIGHT; y++) {
+        for (size_t x = 0; x < VGA_WIDTH; x++) {
+            const size_t index = y * VGA_WIDTH + x;
+            terminal_color = vga_entry_color(VGA_COLOR_DARK_GREY + y, VGA_COLOR_DARK_GREY + y);
+            terminal_buffer[index] = vga_entry(' ', terminal_color);
+            //for (volatile int i = 0; i < 60000; i++);
+        }
+    }
+}
+int cury = 6;
+int curx = 55;
+
+int home() {
+
+    drawbg();
+    waitwrite = true;
+    for (volatile int i = 0; i < 60000000; i++);
+    terminal_color = vga_entry_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
+    terminal_row = 6;
+    for (int i = 0; i < 13; i++) {
+        terminal_column = 11;
+        terminal_writestring("                                                       ");
+        terminal_newline();
+        for (volatile int i = 0; i < 60000; i++);
+    }
+    terminal_row = 3;
+    terminal_color = vga_entry_color(VGA_COLOR_WHITE, VGA_COLOR_BROWN); 
+    terminal_newline();
+    terminal_column = 10;
+    terminal_writestring(" Programs                                            x ");
+    terminal_color = vga_entry_color(VGA_COLOR_WHITE, VGA_COLOR_DARK_GREY);
+    terminal_newline();
+    terminal_column = 10;
+    terminal_writestring("                                                       ");
+    terminal_newline();
+    terminal_column = 10;	
+    terminal_writestring(" Placeholder                                           ");
+    terminal_newline();
+    terminal_column = 10;	
+    terminal_writestring(" Hello, World!                                         ");
+    terminal_newline();
+    for (int i = 0; i < 10; i++) {
+        terminal_column = 10;
+        terminal_writestring("                                                       ");
+        terminal_newline();
+    }
+    update_cursor(55, 6);
+    terminal_column = 10;
+    read_keyboard();
+    while (1) {
+        uint8_t data = read_keyboard();
+        if (data == 0) {
+        }
+        input_buffer[input_buffer_index] = '\0';
+        if (data == 'S') {
+            curx += 1;
+            update_cursor(curx, cury);
+        } else if (data == 'P') {
+            curx -= 1;
+            update_cursor(curx, cury);
+        } else if (data == 'U') {
+            cury -= 1;
+            update_cursor(curx, cury);
+        } else if (data == 'G') {
+            cury += 1;
+            update_cursor(curx, cury);
+        }
+        if (data == '\n') {
+            if (cury == 4 && curx == 63) {
+                welcomewind();
+            }
+        }
+        if (data == 'c') {
+            terminal_initialize();
+            shell();
+            home();
+        }
+        if (data == 'p') {
+            panic("User called panic");
+        }
+        //terminal_putchar(data);
+    }
+}
+
+int panicwind() {
+    drawbg();
+    terminal_color = vga_entry_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
+    terminal_row = 7;
+    for (int i = 0; i < 8; i++) {
+        terminal_column = 16;
+        terminal_writestring("                                                     ");
+        terminal_newline();
+    }
+    terminal_row = 5;
+    terminal_color = vga_entry_color(VGA_COLOR_WHITE, VGA_COLOR_BROWN); 
+    terminal_newline();
+    terminal_column = 15;
+    terminal_writestring(" Error                                               ");
+    terminal_color = vga_entry_color(VGA_COLOR_WHITE, VGA_COLOR_LIGHT_GREY);
+    terminal_newline();
+    terminal_column = 15;
+    terminal_writestring("                                                     ");
+    terminal_newline();
+    terminal_column = 15;	
+    terminal_writestring(" An error occurred and the system has been shutdown. ");
+    terminal_newline();
+    terminal_column = 15;
+    for (int i = 0; i < 5; i++) {
+        terminal_column = 15;
+        terminal_writestring("                                                     ");
+        terminal_newline();
+    }
+    update_cursor(curx, cury);
+}
+
+int welcomewind() {
+    terminal_color = vga_entry_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
+    terminal_row = 7;
+    for (int i = 0; i < 8; i++) {
+        terminal_column = 13;
+        terminal_writestring("                                      ");
+        terminal_newline();
+    }
+    terminal_row = 5;
+    terminal_color = vga_entry_color(VGA_COLOR_WHITE, VGA_COLOR_BROWN); 
+    terminal_newline();
+    terminal_column = 12;
+    terminal_writestring(" Welcome                            x ");
+    terminal_color = vga_entry_color(VGA_COLOR_WHITE, VGA_COLOR_LIGHT_GREY);
+    terminal_newline();
+    terminal_column = 12;
+    terminal_writestring("                                      ");
+    terminal_newline();
+    terminal_column = 12;	
+    terminal_writestring(" Welcome to ");
+    terminal_writestring(osname);
+    terminal_writestring(" ");
+    terminal_writestring(version);
+    terminal_writestring(".");
+    terminal_writestring(subversion);
+    terminal_writestring("!         ");
+    terminal_newline();
+    terminal_column = 12;
+    for (int i = 0; i < 5; i++) {
+        terminal_column = 12;
+        terminal_writestring("                                      ");
+        terminal_newline();
+    }
+    update_cursor(curx, cury);
+}
+
+int displayscreen() {
+
+    if (noprint) {
+        drawbg();
+        waitwrite = true;
+        for (volatile int i = 0; i < 60000000; i++);
+        terminal_color = vga_entry_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
+        terminal_row = 6;
+        for (int i = 0; i < 12; i++) {
+            terminal_column = 11;
+            terminal_writestring("                                                       ");
+            terminal_newline();
+            for (volatile int i = 0; i < 60000; i++);
+        }
+        terminal_row = 3;
+        terminal_color = vga_entry_color(VGA_COLOR_WHITE, VGA_COLOR_BROWN); 
+        terminal_newline();
+        terminal_column = 10;
+        terminal_writestring(" PotatoOS Setup                                      x ");
+        terminal_color = vga_entry_color(VGA_COLOR_WHITE, VGA_COLOR_DARK_GREY);
+        terminal_newline();
+        terminal_column = 10;
+        terminal_writestring("                                                       ");
+        terminal_newline();
+        terminal_column = 10;	
+    } else {
+        terminal_newline();
+    }
+
+    if (noprint) {
+        terminal_writestring(" Do you have a black and white display? [y/N]          ");
+        terminal_newline();
+        for (int i = 0; i < 10; i++) {
+            terminal_column = 10;
+            terminal_writestring("                                                       ");
+            terminal_newline();
+        }
+        update_cursor(55, 6);
+        terminal_column = 10;
+    } else {
+        terminal_writestring(" Do you have a black and white display? [y/N]");
+        terminal_newline();
+    }
+    read_keyboard();
+    uint8_t data = read_keyboard();
+    terminal_putchar(data);
+    if (data == 0) {
+    } else if (data == 'y') {
+        m();
+    }
+}
+
+
+
+void setup() {
+    outb(0x3D4, 0x0A);
+    outb(0x3D5, 0x02);
+    task("Running setup...", 0);
+    if (noprint) {
+        terminal_initialize();
+    }
+
+    displayscreen();
+    if (noprint) {
+        terminal_initialize();
+    }
+    task("Running setup...", 1);
+}
+
+
+void kernel_main(void) 
+{
+    outb(0x3D4, 0x0A);
+    outb(0x3D5, 0x02);
+    waitwrite = true;
+    terminal_color = vga_entry_color(VGA_COLOR_WHITE, 23); 
+    terminal_buffer = (uint16_t*) 0xB8000;
 
     for (size_t y = 0; y < VGA_HEIGHT; y++) {
+        terminal_color = vga_entry_color(VGA_COLOR_DARK_GREY + y, VGA_COLOR_DARK_GREY + y);
         for (size_t x = 0; x < VGA_WIDTH; x++) {
             const size_t index = y * VGA_WIDTH + x;
             terminal_buffer[index] = vga_entry(' ', terminal_color);
@@ -1784,54 +2080,62 @@ int displayscreen() {
         }
     }
     waitwrite = true;
+    terminal_color = vga_entry_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
     terminal_row = 6;
-    terminal_newline();
-    terminal_column = 6;
-    terminal_writestring("Do you have a black and white display? [y/N]");
-
-    terminal_column = 6;
-    read_keyboard();
-    uint8_t data = read_keyboard();
-    terminal_putchar(data);
-    if (data == 0) {
-    } else if (data == 'y') {
-        m();
-        fixflash();
-        fixflash();
+    for (int i = 0; i < 13; i++) {
+        terminal_column = 11;
+        terminal_writestring("                                                       ");
+        terminal_newline();
     }
-}
-
-
-
-void setup() {
-    terminal_initialize();
-    task("Running setup...", 0);
-    fixflash();
-    displayscreen();
+    terminal_row = 3;
+    terminal_color = vga_entry_color(VGA_COLOR_WHITE, VGA_COLOR_BROWN); 
     terminal_newline();
-    task("Running setup...", 1);
-}
-
-
-void kernel_main(void) 
-{
-
-    waitwrite = true;
-    outb(0x3D4, 0x0A);
-    outb(0x3D5, 0x20);
+    terminal_column = 10;
+    terminal_writestring(" PotatoOS                                              ");
+    terminal_color = vga_entry_color(VGA_COLOR_WHITE, VGA_COLOR_DARK_GREY);
+    terminal_newline();
+    terminal_column = 10;
+    terminal_writestring("                                                       ");
+    terminal_newline();
+    terminal_column = 10;	
+    terminal_writestring(" Welcome to ");
+    terminal_writestring(osname);
+    terminal_writestring(" ");
+    terminal_writestring(version);
+    terminal_writestring(".");
+    terminal_writestring(subversion);
+    terminal_writestring("!                          ");
+	terminal_newline();
+    terminal_column = 10;
+    terminal_writestring(" Press v to log, or enter to continue.                 ");
+    terminal_newline();
+    for (int i = 0; i < 10; i++) {
+        terminal_column = 10;
+        terminal_writestring("                                                       ");
+        terminal_newline();
+    }
+    havebeeninitbefore = true;
+    update_cursor(48, 7);
+    terminal_row = 8;
+    noprint = true;
+    uint8_t data2 = read_keyboard();
+    if (data2 == 'v') {
+        noprint = false;
+        terminal_initialize();
+    }
 	//terminal_initialize();
     //set_vga_mode();
 
-    setup();
+    //setup();
+    read_keyboard();
 
 
-
-    terminal_initialize();
+    //terminal_initialize();
 	//terminal_row = 23;
 	//terminal_color = vga_entry_color(VGA_COLOR_BLACK, VGA_COLOR_WHITE);
 	//terminal_writestring(" help = help   ls = list   rm = delete   cd = change dir                    ");
-	terminal_color = vga_entry_color(VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK);
-	terminal_row = 1;
+	//terminal_color = vga_entry_color(VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK);
+	//terminal_row = 1;
 	//terminal_column = 2;
     /*terminal_writestring("                                                        ");
 	terminal_newline();
@@ -1855,19 +2159,11 @@ void kernel_main(void)
     terminal_writestring(subversion);
     terminal_writestring("!");*/
 
-	terminal_newline();
-    terminal_writestring("Welcome to ");
-    terminal_writestring(osname);
-    terminal_writestring(" ");
-    terminal_writestring(version);
-    terminal_writestring(".");
-    terminal_writestring(subversion);
-    terminal_writestring("!");
-	terminal_newline();
+
 	//terminal_color = vga_entry_color(VGA_COLOR_CYAN, VGA_COLOR_BLACK); 
 	//terminal_writestring("WARNING: PotatoOS is in alpha! I am NOT responsible for ANY data loss.");
 
-	terminal_color = vga_entry_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
+	//terminal_color = vga_entry_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
 
     task("Setup paging...", 0);
     setup_paging();
@@ -1875,8 +2171,6 @@ void kernel_main(void)
     task("Setup framebuffer...", 0);
     setup_framebuffer();
     task("Setup framebuffer...", 1);
-    task("Set video mode...", 0);
-    set_vga_mode();
     read_rtc();
     task("Attempting to initialize FAT...", 0);
     if (mainfat() == 0) {
@@ -1891,38 +2185,45 @@ void kernel_main(void)
     receive_ping(); */
 	
     waitwrite = false;
-
-    if (!networkinit && !fsinit) {
+    setup();
+    /* if (!networkinit && !fsinit) {
         //task("Boot PotatoOS", 2);
         task("Entering recovery shell...", task_waiting);
+        if (noprint) {
+            terminal_initialize();
+        }
         shell();
         panic("");
-    }
+    } */
+
 
     terminal_newline();
-    terminal_writestring("Press 's' to enter builtin shell or enter to continue boot process: ");
+    //terminal_writestring("Press 's' to enter builtin shell or enter to continue boot process: ");
 
-    uint8_t data = read_keyboard();
-    terminal_putchar(data);
-    if (data == 's') {
-        shell();
-    } 
+    //uint8_t data = read_keyboard();
+    //terminal_putchar(data);
+    //if (data == 's') {
+    //    shell();
+    //} 
 
     char* config;
 
     if (findconfig("/sys/config") == 0) {
+        home();
     } else {
-        panic("Config file invalid or not found.");
+        //panic("Config file invalid or not found.");
+        shell();
     }
 
 
 }
 
 int findconfig(char* file) {
-    return -1;
+    return 0;
 }
 
 void shell() {
+    waitwrite = false;
     task("Entering recovery shell...", 1);
     terminal_newline();
 	terminal_writestring(username);
@@ -1932,6 +2233,7 @@ void shell() {
 
 	while (1) {
         if (exitHKIloop == true) {
+            panic("exitHLKloop");
             break;
         }
         handle_keyboard_input();
