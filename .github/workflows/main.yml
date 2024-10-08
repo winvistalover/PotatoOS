@@ -1,0 +1,21 @@
+name: Build potatoOS ISO and kernel image
+
+on:
+  workflow_dispatch:
+jobs:
+  build-kernel:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        name: Checkout
+      - name: Build kernel and ISO image
+        run: sh build.sh && sh iso.sh
+      - name: Upload kernel image as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: kernel-image
+          path: sysroot/boot/potatoos.kernel
+      - name: Upload ISO
+        uses: actions/upload-artifact@v4
+        with:
+          name: iso-image
