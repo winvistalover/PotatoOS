@@ -152,21 +152,23 @@ char* task(char* name, int state) {
         terminal_newline();
         //terminal_column = 10;
         if (state == 0) {
-            terminal_writestring("[      ] ");
+            terminal_color = vga_entry_color(VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
+            terminal_writestring("WAIT: ");
+            terminal_color = vga_entry_color(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLACK);
             terminal_writestring(name);
         } else if (state == 1) {
-            terminal_writestring("[  ");
+            //terminal_writestring("[  ");
             terminal_color = vga_entry_color(VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK);
-            terminal_writestring("OK");
-            terminal_color = vga_entry_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
-            terminal_writestring("  ] ");
+            terminal_writestring("OK: ");
+            terminal_color = vga_entry_color(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLACK);
+            //terminal_writestring("  ] ");
             terminal_writestring(name);
         } else if (state == 2) {
-            terminal_writestring("[ ");
+            //terminal_writestring("[ ");
             terminal_color = vga_entry_color(VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
-            terminal_writestring("FAIL");
-            terminal_color = vga_entry_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
-            terminal_writestring(" ] ");
+            terminal_writestring("FAIL: ");
+            terminal_color = vga_entry_color(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLACK);
+            //terminal_writestring(" ] ");
             terminal_writestring(name);
         }
     }
@@ -228,9 +230,9 @@ int mainfat() {
 void terminal_initialize(void) 
 {
 	terminal_row = 1;
-	//terminal_column = 0;
+	terminal_column = 0;
     if (!havebeeninitbefore) {
-        terminal_color = vga_entry_color(VGA_COLOR_BLACK, VGA_COLOR_LIGHT_GREY);
+        terminal_color = vga_entry_color(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLACK);
     }
 	terminal_buffer = (uint16_t*) 0xB8000;
 	for (size_t y = 0; y < VGA_HEIGHT; y++) {
@@ -241,7 +243,7 @@ void terminal_initialize(void)
 	}
 
 
-	terminal_buffer = (uint16_t*) 0xB8000;
+	terminal_buffer = (uint32_t*) 0xB8000;
 	for (size_t y = 0; y < VGA_HEIGHT - 20; y++) {
 		for (size_t x = 0; x < VGA_WIDTH; x++) {
 			const size_t index = y * VGA_WIDTH + x;
@@ -725,9 +727,13 @@ const char keyboard_layout[128] = {
     0, 'a', 's', 'd', 'f', 'g', 'h', 'j', 'k', 'l', ';', '\'', '`',
     0, '\\', 'z', 'x', 'c', 'v', 'b', 'n', 'm', ',', '.', '/', ' ', 
     '!', '@', ' ', '$', '%', '^', '&', '*', '(', ')', '~',
-    'Q', 'W', 'E', 'R', 'T', 'Y', 'U', 'I', 'O', 'P', 'A', 'S', 'D', 'F', 'G', 'H', 'J', 'K', 'L',
-    'Z', 'X', 'C', 'V', 'B', 'N', 'M', '<', '>', '/', '|' 
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
 };
+
+int shift_pressed = 0;
 
 uint16_t read_keyboard() {
     uint16_t data;
@@ -736,12 +742,39 @@ uint16_t read_keyboard() {
     }
     data = inb(0x60);
 
+    if (data == 0xED) { // 0xED is the prefix for some extended keys
+        // Read the next byte
+        while ((inb(0x64) & 0x01) == 0) {
+            // Wait for data to be available
+        }
+        data = inb(0x60);
+    }
+
+    if (data == 0x45) { // Num Lock key
+        task("num lock key pressed", 1);
+    } else if (data == 0x36 || data == 0x2A || data == 0x3A) { // Right Shift key 
+        if (data & 0x80) {
+            shift_pressed = 0;
+        } else {
+            if (shift_pressed) {
+                shift_pressed = 0;
+            } else {
+                shift_pressed = 1;
+            }
+        }
+        return 0;
+    }
+
     if (data & 0x80) {
         return 0;
     }
     
     if (data < sizeof(keyboard_layout)) {
-        return keyboard_layout[data];
+        char c = keyboard_layout[data];
+        if (shift_pressed && (c >= 'a' && c <= 'z')) {
+            c -= 32; // Convert to uppercase
+        }
+        return c;
     }
     
     return 0;
@@ -927,8 +960,22 @@ void read_rtc() {
       /* terminal_putchar(second);
       terminal_putchar(minute);
       terminal_putchar(hour);
-      terminal_putchar(month);
-      terminal_putchar(year); */
+      terminal_putchar(month);*/
+      char yearstr;
+      char monthstr;
+      //char hourstr;
+      //char minutestr;
+      //char secondstr;
+      char daystr;
+      intToStr(month, monthstr);
+      terminal_writestring(monthstr);
+      terminal_writestring("/");
+      intToStr(day, daystr);
+      terminal_writestring(daystr);
+      intToStr(year, yearstr);
+      terminal_writestring("/");
+      terminal_writestring(yearstr);
+      terminal_newline(); 
 }
 
 extern void initTasking();
@@ -1057,6 +1104,9 @@ void handle_keyboard_input() {
 				//terminal_column = 2;
 			//} else if (strcmp(input_buffer, "fsinit") == 0) {
 			//	filesystem_initialize();
+            } else if (strcmp(input_buffer, "pacdeg") == 0) {
+                task("a", 1);
+                terminal_newline();
             } else if (strcmp(input_buffer, "exit") == 0) {
                 exitHKIloop = true;
 			} else if (strcmp(input_buffer, "panic") == 0) {
@@ -1116,12 +1166,12 @@ void handle_keyboard_input() {
             //} else if (strcmp(input_buffer, "setup") == 0) {
             //    setup();
             } else if (strncmp(input_buffer, "un ", 2) == 0) {
-                char** new_buffer = input_buffer;
-                char* content = strtok(new_buffer + 2, " ");
-                username = content;
+                username = strtok(input_buffer + 2, " ");
                 terminal_newline();
                 terminal_writestring("Username is now: ");
                 terminal_writestring(username);
+            } else if (strcmp(input_buffer, "tg") == 0) {
+                home();
             } else if (strcmp(input_buffer, "color") == 0) {
                 while (1)   {
                     uint16_t wait = VGA_HEIGHT - VGA_WIDTH;
@@ -1129,7 +1179,7 @@ void handle_keyboard_input() {
                     //terminal_buffer = (uint16_t*) 0xB8005;
                     for (size_t y = 0; y < VGA_HEIGHT - wait; y++) {
 
-                        terminal_buffer = (uint16_t*) 0xB8000 + y;
+                        terminal_buffer = (uint32_t*) 0xB9000;
                         outb(0x3D4, 0x0A);
                         outb(0x3D5, 0x20);
                         for (size_t y = 0; y < VGA_HEIGHT; y++) {
@@ -1144,16 +1194,16 @@ void handle_keyboard_input() {
                                 //}
                                 //wait -= 10;
                                 //terminal_color = vga_entry_color(wait, wait); 
-                                data = read_keyboard();
-                                if (data == 0);
+                               // data = read_keyboard();
+                                //if (data == 0);
                                 terminal_column += 1;
                                 waitwrite = true;
-                                nyan();
+                                //nyan();
                                 //for (volatile int i = 0; i < 6000; i++);
                             }
                             //beep(y);
                         }
-                        terminal_color = vga_entry_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK); 
+                        terminal_color = vga_entry_color(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLACK); 
                         
                        
 
@@ -1232,8 +1282,8 @@ int paniccolor = 8;
 
 void panic(char* msg) 
 {
-    panicwind();
-	for (volatile int i = 0; i < 600000000; i++);
+    //panicwind();
+	//for (volatile int i = 0; i < 600000000; i++);
 	beep(7040);
     outb(0x3D4, 0x0A);
     outb(0x3D5, 0x20);
@@ -1287,7 +1337,7 @@ void panic(char* msg)
     terminal_row = VGA_HEIGHT - 2;
 	terminal_color = vga_entry_color(VGA_COLOR_WHITE, VGA_COLOR_WHITE); 
     for (volatile int i = 0; i < VGA_WIDTH; i++) {
-        terminal_writestring("#");
+        terminal_writestring(" ");
         for (volatile int i = 0; i < 60000000; i++);
     }
     reboot();
@@ -1815,7 +1865,7 @@ void m() {
 }
 
 int fixflash() {
-    terminal_color = vga_entry_color(VGA_COLOR_WHITE, paniccolor); 
+    terminal_color = vga_entry_color(VGA_COLOR_LIGHT_GREY, paniccolor); 
     terminal_buffer = (uint16_t*) 0xB8000;
     input_buffer_index = 0;
 
@@ -1859,7 +1909,7 @@ int home() {
     drawbg();
     waitwrite = true;
     for (volatile int i = 0; i < 60000000; i++);
-    terminal_color = vga_entry_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
+    terminal_color = vga_entry_color(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLACK);
     terminal_row = 6;
     for (int i = 0; i < 13; i++) {
         terminal_column = 11;
@@ -1868,11 +1918,11 @@ int home() {
         for (volatile int i = 0; i < 60000; i++);
     }
     terminal_row = 3;
-    terminal_color = vga_entry_color(VGA_COLOR_WHITE, VGA_COLOR_BROWN); 
+    terminal_color = vga_entry_color(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BROWN); 
     terminal_newline();
     terminal_column = 10;
     terminal_writestring(" Programs                                            x ");
-    terminal_color = vga_entry_color(VGA_COLOR_WHITE, VGA_COLOR_DARK_GREY);
+    terminal_color = vga_entry_color(VGA_COLOR_LIGHT_GREY, VGA_COLOR_DARK_GREY);
     terminal_newline();
     terminal_column = 10;
     terminal_writestring("                                                       ");
@@ -1928,7 +1978,7 @@ int home() {
 
 int panicwind() {
     drawbg();
-    terminal_color = vga_entry_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
+    terminal_color = vga_entry_color(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLACK);
     terminal_row = 7;
     for (int i = 0; i < 8; i++) {
         terminal_column = 16;
@@ -1936,11 +1986,11 @@ int panicwind() {
         terminal_newline();
     }
     terminal_row = 5;
-    terminal_color = vga_entry_color(VGA_COLOR_WHITE, VGA_COLOR_BROWN); 
+    terminal_color = vga_entry_color(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BROWN); 
     terminal_newline();
     terminal_column = 15;
     terminal_writestring(" Error                                               ");
-    terminal_color = vga_entry_color(VGA_COLOR_WHITE, VGA_COLOR_LIGHT_GREY);
+    terminal_color = vga_entry_color(VGA_COLOR_LIGHT_GREY, VGA_COLOR_LIGHT_GREY);
     terminal_newline();
     terminal_column = 15;
     terminal_writestring("                                                     ");
@@ -1958,7 +2008,7 @@ int panicwind() {
 }
 
 int welcomewind() {
-    terminal_color = vga_entry_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
+    terminal_color = vga_entry_color(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLACK);
     terminal_row = 7;
     for (int i = 0; i < 8; i++) {
         terminal_column = 13;
@@ -1966,11 +2016,11 @@ int welcomewind() {
         terminal_newline();
     }
     terminal_row = 5;
-    terminal_color = vga_entry_color(VGA_COLOR_WHITE, VGA_COLOR_BROWN); 
+    terminal_color = vga_entry_color(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BROWN); 
     terminal_newline();
     terminal_column = 12;
     terminal_writestring(" Welcome                            x ");
-    terminal_color = vga_entry_color(VGA_COLOR_WHITE, VGA_COLOR_LIGHT_GREY);
+    terminal_color = vga_entry_color(VGA_COLOR_LIGHT_GREY, VGA_COLOR_LIGHT_GREY);
     terminal_newline();
     terminal_column = 12;
     terminal_writestring("                                      ");
@@ -1999,7 +2049,7 @@ int displayscreen() {
         drawbg();
         waitwrite = true;
         for (volatile int i = 0; i < 60000000; i++);
-        terminal_color = vga_entry_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
+        terminal_color = vga_entry_color(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLACK);
         terminal_row = 6;
         for (int i = 0; i < 12; i++) {
             terminal_column = 11;
@@ -2008,11 +2058,11 @@ int displayscreen() {
             for (volatile int i = 0; i < 60000; i++);
         }
         terminal_row = 3;
-        terminal_color = vga_entry_color(VGA_COLOR_WHITE, VGA_COLOR_BROWN); 
+        terminal_color = vga_entry_color(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BROWN); 
         terminal_newline();
         terminal_column = 10;
         terminal_writestring(" PotatoOS Setup                                      x ");
-        terminal_color = vga_entry_color(VGA_COLOR_WHITE, VGA_COLOR_DARK_GREY);
+        terminal_color = vga_entry_color(VGA_COLOR_LIGHT_GREY, VGA_COLOR_DARK_GREY);
         terminal_newline();
         terminal_column = 10;
         terminal_writestring("                                                       ");
@@ -2062,13 +2112,140 @@ void setup() {
     task("Running setup...", 1);
 }
 
+// Structure to hold the memory map entry
+typedef struct {
+    uint32_t base_addr;
+    uint32_t length;
+    uint32_t type;
+    uint32_t acpi;
+} memory_map_entry_t;
+
+// Function to get the RSDP address
+uint32_t get_rsdp_addr() {
+    uint32_t rsdp_addr = 0;
+    for (uint32_t i = 0x000E0000; i <= 0x000FFFFF; i += 16) {
+        if (*((uint32_t*)i) == 0x20445352) {
+            rsdp_addr = i;
+            break;
+        }
+    }
+    return rsdp_addr;
+}
+
+// Function to get the RSDT address
+uint32_t get_rsdt_addr(uint32_t rsdp_addr) {
+    uint32_t rsdt_addr = 0;
+    rsdt_addr = *((uint32_t*)(rsdp_addr + 16));
+    return rsdt_addr;
+}
+
+void get_memory_map(memory_map_entry_t *entries, uint32_t *num_entries) {
+    uint32_t rsdp_addr = get_rsdp_addr();
+    uint32_t rsdt_addr = get_rsdt_addr(rsdp_addr);
+    uint32_t entry_size = 20; // Example size, adjust as necessary
+
+    if (rsdt_addr == 0) {
+        terminal_writestring("Invalid RSDT address");
+        return;
+    }
+
+    uint32_t num = 0;
+    uint32_t entry_addr = rsdt_addr + 36;
+    uint32_t total_size = rsdt_addr + 36 + entry_size; // Debug this
+    terminal_writestring("BOOT: Total size: ");
+    char size_str[20];
+    intToStr(total_size, size_str);
+    terminal_writestring(size_str);
+    terminal_writestring(" bytes");
+    if (total_size < -1) {
+        task("int overflow", 2);
+        terminal_newline();
+    }
+
+    while (entry_addr < total_size) {
+        entries[num].base_addr = *((uint32_t*)entry_addr);
+        entries[num].length = *((uint32_t*)(entry_addr + 4));
+        entries[num].type = *((uint32_t*)(entry_addr + 8));
+        entries[num].acpi = *((uint32_t*)(entry_addr + 12)); // Optional ACPI
+        num++;
+        entry_addr += entry_size;
+    }
+
+    
+    *num_entries = num;
+    terminal_writestring("BOOT: Num Entries: ");
+    char num_str[10];
+    intToStr(num, num_str);
+    terminal_writestring(num_str);
+    terminal_newline();
+}
+
+
+
+
+
+
+void intToStr(int N, char *str) {
+    int i = 0;
+    int sign = N;
+    if (N < 0)
+        N = -N;
+    while (N > 0) {
+        str[i++] = N % 10 + '0';
+        N /= 10;
+    }
+    if (sign < 0) {
+        str[i++] = '-';
+    }
+    if (i == 0) { // Handle 0 case
+        str[i++] = '0';
+    }
+    str[i] = '\0';
+    for (int j = 0, k = i - 1; j < k; j++, k--) {
+        char temp = str[j];
+        str[j] = str[k];
+        str[k] = temp;
+    }
+}
+
+void print_memory_size() {
+    memory_map_entry_t entries[100];
+    uint32_t num_entries = 0;
+    get_memory_map(entries, &num_entries);
+
+
+
+    int total_memory_size = 0;
+    
+
+    for (uint32_t i = 0; i < num_entries; i++) {
+        if (entries[i].type == 1) {
+            total_memory_size += entries[i].length / (1024 * 1024);
+        }
+    }
+
+
+    waitwrite = true;
+
+    for (volatile int i = 0; i < 600000000; i++);
+
+}
+
+int countmem() {
+    print_memory_size();
+    terminal_writestring("BOOT: init fs");
+    terminal_newline();
+    return 0; // Return a value to indicate successful execution
+}
+
 
 void kernel_main(void) 
 {
     outb(0x3D4, 0x0A);
     outb(0x3D5, 0x02);
     waitwrite = true;
-    terminal_color = vga_entry_color(VGA_COLOR_WHITE, 23); 
+    /*
+    terminal_color = vga_entry_color(VGA_COLOR_LIGHT_GREY, 23); 
     terminal_buffer = (uint16_t*) 0xB8000;
 
     for (size_t y = 0; y < VGA_HEIGHT; y++) {
@@ -2080,7 +2257,7 @@ void kernel_main(void)
         }
     }
     waitwrite = true;
-    terminal_color = vga_entry_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
+    terminal_color = vga_entry_color(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLACK);
     terminal_row = 6;
     for (int i = 0; i < 13; i++) {
         terminal_column = 11;
@@ -2088,11 +2265,11 @@ void kernel_main(void)
         terminal_newline();
     }
     terminal_row = 3;
-    terminal_color = vga_entry_color(VGA_COLOR_WHITE, VGA_COLOR_BROWN); 
+    terminal_color = vga_entry_color(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BROWN); 
     terminal_newline();
     terminal_column = 10;
     terminal_writestring(" PotatoOS                                              ");
-    terminal_color = vga_entry_color(VGA_COLOR_WHITE, VGA_COLOR_DARK_GREY);
+    terminal_color = vga_entry_color(VGA_COLOR_LIGHT_GREY, VGA_COLOR_DARK_GREY);
     terminal_newline();
     terminal_column = 10;
     terminal_writestring("                                                       ");
@@ -2122,17 +2299,19 @@ void kernel_main(void)
     if (data2 == 'v') {
         noprint = false;
         terminal_initialize();
-    }
+    }*/
 	//terminal_initialize();
     //set_vga_mode();
-
+    noprint = false;
+    terminal_initialize();
+    countmem();
     //setup();
-    read_keyboard();
+    //read_keyboard();
 
 
     //terminal_initialize();
 	//terminal_row = 23;
-	//terminal_color = vga_entry_color(VGA_COLOR_BLACK, VGA_COLOR_WHITE);
+	//terminal_color = vga_entry_color(VGA_COLOR_BLACK, VGA_COLOR_LIGHT_GREY);
 	//terminal_writestring(" help = help   ls = list   rm = delete   cd = change dir                    ");
 	//terminal_color = vga_entry_color(VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK);
 	//terminal_row = 1;
@@ -2163,7 +2342,7 @@ void kernel_main(void)
 	//terminal_color = vga_entry_color(VGA_COLOR_CYAN, VGA_COLOR_BLACK); 
 	//terminal_writestring("WARNING: PotatoOS is in alpha! I am NOT responsible for ANY data loss.");
 
-	//terminal_color = vga_entry_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
+	//terminal_color = vga_entry_color(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLACK);
 
     task("Setup paging...", 0);
     setup_paging();
@@ -2194,10 +2373,10 @@ void kernel_main(void)
         }
         shell();
         panic("");
-    } */
+    }*/
 
 
-    terminal_newline();
+    //terminal_newline();
     //terminal_writestring("Press 's' to enter builtin shell or enter to continue boot process: ");
 
     //uint8_t data = read_keyboard();
@@ -2208,18 +2387,19 @@ void kernel_main(void)
 
     char* config;
 
-    if (findconfig("/sys/config") == 0) {
-        home();
+    /* if (findconfig("/sys/config") == 0) {
+        //home();
     } else {
         //panic("Config file invalid or not found.");
         shell();
-    }
+    } */
+    shell();
 
 
 }
 
 int findconfig(char* file) {
-    return 0;
+    return -1;
 }
 
 void shell() {
@@ -2233,7 +2413,6 @@ void shell() {
 
 	while (1) {
         if (exitHKIloop == true) {
-            panic("exitHLKloop");
             break;
         }
         handle_keyboard_input();
