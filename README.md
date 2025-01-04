@@ -17,12 +17,14 @@ https://discord.gg/4Gq4ya5DME
 To build PotatoOS, follow the steps below.
 ## 1️⃣ Install prerequisites
 ```bash
-pacman -S qemu
 yay -S i686-elf-gcc
 ```
 ## 2️⃣ Build
 ```bash
 sh build.sh
+```
+Or ```bash
+sh iso.sh
 ```
 
 # 👋 Contact
