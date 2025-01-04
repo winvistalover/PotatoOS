@@ -8,8 +8,7 @@
   </a>
 </p><br>
 
-A unix-like operating system made in C.
-It's not quite unix-like *yet*. But we're getting there.<br>
+An operating system made in C.
 Join the Discord server!
 https://discord.gg/4Gq4ya5DME
 
