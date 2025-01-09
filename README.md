@@ -23,7 +23,8 @@ yay -S i686-elf-gcc
 ```bash
 sh build.sh
 ```
-Or ```bash
+Or 
+```bash
 sh iso.sh
 ```
 
