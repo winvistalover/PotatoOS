@@ -29,7 +29,7 @@ sh iso.sh
 ```
 
 # 👋 Contact
-Email me at "ospotato3@gmail.com" or DM me on Discord "oslayout" if you have any questions
+Email me at "ospotato3@gmail.com" or DM me on Discord "komarutac" if you have any questions
 
 # ⚖️ License and Credits
 This project is licensed under the [MIT License](https://mit-license.org/).
