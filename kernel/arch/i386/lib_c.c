@@ -1,6 +1,6 @@
 #include "lib_asm.h"
 #include "lib_c.h"
-#include <string.h>
+#include <stddef.h>
 #include <stdint.h>
 
 #define TTY       0x03F8
@@ -319,51 +319,6 @@ void _printInt(int val, int base)
 	putstring(ptr);
 }
 
-void _printf(char * fmt, ...)
-{
-	int i = 0;
-	char *s, *p = (char *)fmt;
-	unsigned long *argptr = (unsigned long *)&fmt;
-	argptr++;
-	while (*p != '\0') // is not NULL
-	{
-		if (*p != '%')
-		{
-			putcc(*p);
-			p++;
-			continue;
-		}
-
-		else if (*p == '%')
-		{
-			switch (*(p+1))
-			{
-			case 'd':
-				i = *(int *)argptr;
-				_printInt(i, 10);
-				argptr++;
-				p+=2;
-				break;
-			case 's':
-				s = (char *)*argptr;
-				putstring(s);
-				argptr++;
-				p+=2;
-				break;
-			case 'x': 
-				i = *(int *)argptr;
-				_printInt(i, 16);
-				argptr++;
-				p+=2;
-				break;
-			default:
-				putcc(*p);
-				p++;
-				break;
-			}
-		}
-	}
-}
 
 char* uppercase_str(char* input)
 {

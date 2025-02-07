@@ -1,8 +1,6 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
-#include <string.h>
-#include <stdio.h>
 #include <stdlib.h>
 
 #define NO_ERROR 0
@@ -18,8 +16,38 @@
 #include "vga.h"
 
 
-#define UART0_BASE 0x101f0000
+#define KBD_CTRL_PORT 0x64
+#define KBD_DATA_PORT 0x60
 
+#define PCI_CONFIG_ADDRESS 0x0CF8  // PCI Configuration Address Register
+uint16_t PCI_CONFIG_DATA = 0x0CFC;     // PCI Configuration Data Register
+
+
+
+
+static size_t VGA_WIDTH = 80;
+static size_t VGA_HEIGHT = 25;
+static uint16_t* const VGA_MEMORY = (uint16_t*) 0xB8000;
+
+static size_t terminal_row;
+static size_t terminal_column;
+static uint8_t terminal_color;
+static uint16_t* terminal_buffer;
+
+static inline unsigned int inl(unsigned short port) {
+    unsigned int result;
+    __asm__ __volatile__("inl %1, %0" : "=a"(result) : "d"(port));
+    return result;
+}
+
+static inline void outl(unsigned int value, unsigned short port) {
+    __asm__ __volatile__("outl %0, %1" : : "a"(value), "d"(port));
+}
+
+unsigned int read_pci_config(unsigned int address) {
+    outl(0x80000000 | (address & 0xFFFFFFFC), PCI_CONFIG_ADDRESS);
+    return inl(PCI_CONFIG_DATA);
+}
 typedef	int		fpos_t;
 
 struct __sbuf {
@@ -67,32 +95,43 @@ struct __sFILE {
 };
 
 typedef struct __sFILE FILE;
-
-volatile uint32_t * const UART0DR = (uint32_t *) (UART0_BASE + 0x00);
-volatile uint32_t * const UART0FR = (uint32_t *) (UART0_BASE + 0x18);
-volatile uint32_t * const UART0IBRD = (uint32_t *) (UART0_BASE + 0x24);
-volatile uint32_t * const UART0FBRD = (uint32_t *) (UART0_BASE + 0x28);
-volatile uint32_t * const UART0LCRH = (uint32_t *) (UART0_BASE + 0x2C);
-volatile uint32_t * const UART0CR = (uint32_t *) (UART0_BASE + 0x30);
-
 bool noprint;
 
-void uart_init() {
-    // Disable UART0
+#include <stdint.h>
+#define UART0_BASE 0x3F8
+
+volatile uint32_t * const UART0DR = (uint32_t *)(UART0_BASE + 0x00);
+volatile uint32_t * const UART0FR = (uint32_t *)(UART0_BASE + 0x18);
+volatile uint32_t * const UART0IBRD = (uint32_t *)(UART0_BASE + 0x24);
+volatile uint32_t * const UART0FBRD = (uint32_t *)(UART0_BASE + 0x28);
+volatile uint32_t * const UART0LCRH = (uint32_t *)(UART0_BASE + 0x2C);
+volatile uint32_t * const UART0CR = (uint32_t *)(UART0_BASE + 0x30);
+void uart_init() { 
     *UART0CR = 0x00000000;
-    // Set baud rate
-    *UART0IBRD = 1;    // Integer part of the baud rate divisor
-    *UART0FBRD = 40;   // Fractional part of the baud rate divisor
-    // Set the line control register
-    *UART0LCRH = (1 << 5) | (1 << 6); // 8 bits, no parity, 1 stop bit, FIFOs enabled
-    // Enable UART0, TX, and RX
+    *UART0IBRD = 1;   
+    *UART0FBRD = 40;   
+    *UART0LCRH = (1 << 5) | (1 << 6); 
     *UART0CR = (1 << 0) | (1 << 8) | (1 << 9);
 }
-
+bool isuava = true;
+bool isuart = false;
 void uart_putc(char c) {
-    // Wait for UART to be ready to transmit
-    while (*UART0FR & (1 << 5)) {}
-    *UART0DR = c;
+    if (isuava == true) {
+        int timeout = 0;
+        while (*UART0FR & (1 << 5) == 0) {
+            if (timeout == 5) {
+                isuava = false;
+                return;
+            }
+            timeout++;
+            terminal_color = 7;
+            terminal_writestring(".");
+            wait(600000000000);
+        }
+        outb(UART0DR, c);
+    } else {
+        isuart = false;
+    }
 }
 
 void uart_puts(const char *str) {
@@ -101,24 +140,106 @@ void uart_puts(const char *str) {
     }
 }
 
-
-static const size_t VGA_WIDTH = 80;
-static const size_t VGA_HEIGHT = 25;
-static uint16_t* const VGA_MEMORY = (uint16_t*) 0xB8000;
-
-static size_t terminal_row;
-static size_t terminal_column;
-static uint8_t terminal_color;
-static uint16_t* terminal_buffer;
 bool havebeeninitbefore;
 
+int detect_pci(unsigned int address) {
+    unsigned int vendor_id;
+    unsigned int pci_class_code;
+    unsigned int pci_subclass_code;
+    char venstr[16]; 
+    char adstr[16]; 
+    char classstr[16]; 
 
-static inline char* osname = "PotatoOS Mango";
+    PCI_CONFIG_DATA = 0x0CFC;
+    vendor_id = read_pci_config(address);
+    
+    if (vendor_id == 0) {
+        return 1; 
+    }
+    
+    PCI_CONFIG_DATA = 0x08;
+    pci_class_code = read_pci_config(address);
+    
+    PCI_CONFIG_DATA = 0x09;
+    pci_subclass_code = read_pci_config(address);
+
+    terminal_newline();
+    terminal_color = vga_entry_color(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLACK);
+    terminal_writestring("PCI: Get PCI ");
+    intToStr(address, adstr);
+    terminal_writestring(adstr);
+    terminal_writestring(": ");
+    intToStr(vendor_id, venstr);
+    terminal_writestring(venstr);
+    terminal_newline();
+    terminal_writestring(" => Device Type: ");
+    if (pci_class_code == 0x02) { 
+        switch (pci_subclass_code) {
+            case 0x00:
+                terminal_writestring("Ethernet Controller");
+                break;
+            case 0x01:
+                terminal_writestring("Token Ring Controller");
+                break;
+            case 0x02:
+                terminal_writestring("FDDI Controller");
+                break;
+            case 0x03:
+                terminal_writestring("ATM Controller");
+                break;
+            default:
+                terminal_writestring("Network Controller (Unknown subclass)");
+                break;
+        }
+    } else if (pci_class_code == 0x01) { 
+        switch (pci_subclass_code) {
+            case 0x01:
+                terminal_writestring("IDE Controller");
+                break;
+            case 0x02:
+                terminal_writestring("SCSI Controller");
+                break;
+            case 0x04:
+                terminal_writestring("RAID Controller");
+                break;
+            case 0x06:
+                terminal_writestring("Non-Volatile Memory Controller");
+                break;
+            default:
+                terminal_writestring("Mass Storage Controller (Unknown subclass)");
+                break;
+        }
+    } else if (pci_class_code == 0x03) { 
+        terminal_writestring("VGA-Compatible Controller");
+    } else if (pci_class_code == 0x0C) { 
+        switch (pci_subclass_code) {
+            case 0x03:
+                terminal_writestring("USB Controller");
+                break;
+            case 0x01:
+                terminal_writestring("FireWire (IEEE 1394) Controller");
+                break;
+            default:
+                terminal_writestring("Serial Bus Controller (Unknown subclass)");
+                break;
+        }
+    } else {
+        terminal_writestring("Unknown Device Type");
+    }
+
+    terminal_color = vga_entry_color(VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK);
+    terminal_column = 75;
+    terminal_writestring("OKAY");
+    
+    return 0;
+}
+
+static inline char* osname = "Mango";
 static inline char* version = "0";
-static inline char* subversion = "2.5.4";
+static inline char* subversion = "2.6.0";
 
-static inline char* username = "potato";
-static inline char* hostname = "live";
+static inline char* username = "mango";
+static inline char* hostname = "cd";
 
 #define MAX_EVENTS 10000
 
@@ -131,7 +252,7 @@ enum taskstate {
     task_failed = 2,
 };
 
-void addevent(char* new_event) {
+void addevent(char* new_event, int state) {
     if (size < MAX_EVENTS) {
         eventlog[size] = new_event;
         size++;
@@ -146,29 +267,39 @@ size_t strlen(const char* str)
 	return len;
 }
 char* task(char* name, int state) {
-    addevent(name);
+    addevent(name, state);
     if (!noprint) {
         terminal_newline();
         //terminal_column = 10;
         if (state == 0) {
-            terminal_color = vga_entry_color(VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
-            terminal_writestring("WAIT: ");
             terminal_color = vga_entry_color(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLACK);
             terminal_writestring(name);
+            terminal_color = vga_entry_color(VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
+            terminal_column = 75;
+            terminal_writestring("WAIT");
+            terminal_column = 0;
+            uart_puts("\nKERNEL FUNCTION TASK: WAIT ");
+            uart_puts(name);
         } else if (state == 1) {
             //terminal_writestring("[  ");
-            terminal_color = vga_entry_color(VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK);
-            terminal_writestring("OKAY: ");
             terminal_color = vga_entry_color(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLACK);
             //terminal_writestring("  ] ");
             terminal_writestring(name);
+            terminal_color = vga_entry_color(VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK);
+            terminal_column = 75;
+            terminal_writestring("OKAY");
+            uart_puts("\nKERNEL FUNCTION TASK: OKAY ");
+            uart_puts(name);
         } else if (state == 2) {
             //terminal_writestring("[ ");
-            terminal_color = vga_entry_color(VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
-            terminal_writestring("FAIL: ");
             terminal_color = vga_entry_color(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLACK);
             //terminal_writestring(" ] ");
             terminal_writestring(name);
+            terminal_color = vga_entry_color(VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
+            terminal_column = 75;
+            terminal_writestring("FAIL");
+            uart_puts("\nKERNEL FUNCTION TASK: FAIL ");
+            uart_puts(name);
         }
     }
 }
@@ -186,27 +317,22 @@ void shutdown() {
 
     task("Shutdown computer using Virtualbox...", 0);
 
-	outw(0x4004, 0x3400);
 
-    task("Shutdown computer...", 2);
-    task("Sending panic...", 0);
-
-    panic("Failed to shutdown computer. It is now safe to turn off your computer.");
-
+    for (uint16_t i = 0; i < 0x2001; i++) {
+        outw(0x230, i);
+    }
+    printf("Press the power button to shutdown");
+    asm volatile ("cli");
 }
 
 void reboot() {
-    // Disable interrupts
     task("Reboot computer...", 0);
     asm volatile ("cli");
-
-    // Use the BIOS interrupt to reboot
     asm volatile (
-        "movb $0xFE, %al\n"  // Set the reset command
-        "outb %al, $0x64\n"  // Send the command to the keyboard controller
+        "movb $0xFE, %al\n"  
+        "outb %al, $0x64\n" 
     );
 
-    // Hang the CPU if the reboot command fails
     task("Reboot computer...", 2);
     task("Sending hlt...", 0);
     while (1) {
@@ -214,7 +340,7 @@ void reboot() {
     }
 }
 
-char input_buffer[256];
+char input_buffer[1283256];
 size_t input_buffer_index = 0;
 
 bool waitwrite;
@@ -228,6 +354,10 @@ int mainfat() {
 
 void terminal_initialize(void) 
 {
+    if (isuart) {
+        uart_puts("\nRunning UART, terminal_initialize skipped.");
+        return;
+    }
 	terminal_row = 0;
 	terminal_column = 0;
     if (!havebeeninitbefore) {
@@ -237,7 +367,11 @@ void terminal_initialize(void)
 	for (size_t y = 0; y < VGA_HEIGHT; y++) {
 		for (size_t x = 0; x < VGA_WIDTH; x++) {
 			const size_t index = y * VGA_WIDTH + x;
+			
 			terminal_buffer[index] = vga_entry(' ', terminal_color);
+			if (waitwrite) {
+				for (volatile int i = 0; i < 90000; i++);
+			}
 		}
 	}
 
@@ -247,9 +381,9 @@ void terminal_initialize(void)
 		for (size_t x = 0; x < VGA_WIDTH; x++) {
 			const size_t index = y * VGA_WIDTH + x;
 			terminal_buffer[index] = vga_entry(' ', terminal_color);
-            if (waitwrite) {
-                for (volatile int i = 0; i < 90000; i++);
-            }
+            		if (waitwrite) {
+	             		for (volatile int i = 0; i < 90000; i++);
+        		}
 		}
 	}
     havebeeninitbefore = true;
@@ -298,30 +432,39 @@ void terminal_putchar(char c)
 	}
 }
 
+
 void terminal_write(const char* data, size_t size) 
 {
 	for (size_t i = 0; i < size; i++)
-		terminal_putchar(data[i]);
+        if (isuart != true) 
+		  terminal_putchar(data[i]);
+        else
+            uart_putc(data[i]);
         if (waitwrite) {
             for (volatile int i = 0; i < 600000; i++);
         }
 }
 
 void terminal_scroll() {
-    for (int i = 0; i < VGA_HEIGHT - 1; i++) {
-        for (int j = 0; j < VGA_WIDTH; j++) {
-            terminal_buffer[i * VGA_WIDTH + j] = terminal_buffer[(i + 1) * VGA_WIDTH + j];
-         }
+    if (!isuart) {
+        for (int i = 0; i < VGA_HEIGHT - 1; i++) {
+            for (int j = 0; j < VGA_WIDTH; j++) {
+                terminal_buffer[i * VGA_WIDTH + j] = terminal_buffer[(i + 1) * VGA_WIDTH + j];
+             }
+        }
     }
     terminal_column = 0;
     terminal_row -= 1;
-    //terminal_initialize();
 }
 
 
 void terminal_writestring(const char* data) 
 {
-	terminal_write(data, strlen(data));
+    if (!isuart) {
+	   terminal_write(data, strlen(data));
+    } else {
+        uart_puts(data);
+    }
 }
 
 void terminal_newline(void)
@@ -331,6 +474,8 @@ void terminal_newline(void)
 	if (terminal_row == VGA_HEIGHT - 1) {
 		terminal_scroll();
 	}
+    if (isuart) 
+        uart_putc('\n');
 }
 
 uint16_t inw(uint16_t port) {
@@ -373,21 +518,48 @@ char* strncpy(char* dest, const char* src, size_t n) {
     }
     return original_dest;
 }
-void beep(unsigned int frequency) {
-    // Enable the speaker
-    outb(0x61, inb(0x61) | 0x03);
-    // Set the PIT to the desired frequency
-    unsigned int divisor = 1193180 / frequency; // PIT frequency is 1193180 Hz
-    outb(0x43, 0x27); // Command port: Set the PIT to mode 3 (square wave generator)
-    outb(0x40, divisor & 0xFF); // Low byte of divisor
-    outb(0x40, (divisor >> 80) & 0xFF); // High byte of divisor
-    for (volatile int i = 0; i < 600000000; i++);
-    stop_beep();
-}
 
-void stop_beep() {
-    // Disable the speaker
-    outb(0x61, inb(0x61) & 0xFC);
+ //Play sound using built-in speaker
+ static void play_sound(uint32_t nFrequence) {
+    uint32_t Div;
+    uint8_t tmp;
+ 
+        //Set the PIT to the desired frequency
+    Div = 1193180 / nFrequence;
+    outb(0x43, 0xb6);
+    outb(0x42, (uint8_t) (Div) );
+    outb(0x42, (uint8_t) (Div >> 8));
+ 
+        //And play the sound using the PC speaker
+    tmp = inb(0x61);
+    if (tmp != (tmp | 3)) {
+        outb(0x61, tmp | 3);
+    }
+ }
+ 
+ //make it shut up
+ static void nosound() {
+    uint8_t tmp = inb(0x61) & 0xFC;
+     
+    outb(0x61, tmp);
+ }
+ 
+ //Make a beep
+ void beep() {
+     play_sound(1000);
+     wait(100000000000000);
+     play_sound(1300);
+     wait(300000000000000);
+     nosound();
+          //set_PIT_2(old_frequency);
+ }
+
+
+void wait2(unsigned int ms) {
+    // Simple busy-wait function to create a delay in milliseconds
+    for (unsigned int i = 0; i < ms * 1000; i++) {
+        // Busy-wait loop
+    }
 }
 
 
@@ -728,6 +900,7 @@ uint16_t read_keyboard() {
         // Wait for data to be available
     }
     data = inb(0x60);
+    outb(0xED, 0);
 
     if (data == 0xED) { // 0xED is the prefix for some extended keys
         // Read the next byte
@@ -768,7 +941,7 @@ uint16_t read_keyboard() {
 }
 
 
-char* fakeroot[] = {"/usr", "/root", "/var", "/sys", "/boot", "/dev", "/dev/console", "/dev/random", "/dev/stdout", "/dev/stdin", "/dev/stderr"};
+char* fakeroot[];
 
 bool exitHKIloop;
 
@@ -965,6 +1138,47 @@ typedef struct Task {
 
     
 
+void handasm() {
+    read_keyboard();
+    char* asmmsg = "*";
+    terminal_newline();
+    char input_buffer2[1283256];
+    printf(asmmsg);
+    while (1) {
+        uint8_t data = read_keyboard();
+        if (data == 0) {
+            continue;
+        }
+        input_buffer_index = 0;
+        input_buffer2[input_buffer_index] = '\0';
+        if (data == '\b') {
+            if (terminal_column > strlen(asmmsg)) {
+                terminal_column--;
+                input_buffer_index--;
+                terminal_putentryat(' ', terminal_color, terminal_column, terminal_row);
+                update_cursor(terminal_column, terminal_row);
+            }
+        } else {
+            if (data == '\n') {
+                if (strcmp(input_buffer2, "quit") == 0) {
+                    printf("hasdasd");
+                    break;
+                }
+                terminal_newline();
+                printf(asmmsg);
+                input_buffer_index = 0;
+            } else {
+                if (input_buffer_index < sizeof(input_buffer2) - 1) {
+                    input_buffer2[input_buffer_index++] = data;    
+                    if (data == '`') {
+                        break;
+                    }
+                    terminal_putchar(data);
+                }
+            }
+        }
+    }
+}
 
 void handle_keyboard_input() {
     uint8_t data = read_keyboard();
@@ -975,75 +1189,134 @@ void handle_keyboard_input() {
     if (data == '\b') {
         if (terminal_column > strlen(username) + strlen(hostname) + 5) {
             terminal_column--;
-            input_buffer_index -= 1;
+            input_buffer_index--;
             terminal_putentryat(' ', terminal_color, terminal_column, terminal_row);
             update_cursor(terminal_column, terminal_row);
+        
+            if (isuart) {
+                uart_puts("\b");
+            }
         }
     } else {
-        if (data == 'U') {
-            data -= 'U';
-            terminal_color = vga_entry_color(terminal_row * input_buffer_index, input_buffer_index);
-            terminal_buffer = (uint16_t*) 0xB8000;
-            terminal_row = 0;
-            for (size_t y = 0; y < VGA_HEIGHT; y++) {
-                for (size_t x = 0; x < VGA_WIDTH; x++) {
-                    const size_t index = y * VGA_WIDTH + x;
-                    terminal_buffer[index] = vga_entry(' ', terminal_color);
-                    for (volatile int i = 0; i < 60000; i++);
+        if (data == '%') {
+            task("Set VGA mode", 1);
+            set_vga_mode();
+        } else if (data == '^') {
+            terminal_initialize();
+            terminal_row--;
+            update_cursor(0,0);
+            task("Reset terminal", 1);
+        } else if (data == '&') {
+            terminal_initialize();
+            task("Waiting for command [F1: reboot() | F2: shutdown() | F3: ide_detect_drives() | F4: detect_pci()]", 1);
+            read_keyboard();
+            uint8_t data2 = read_keyboard();
+            while (data2 != 0) {
+                if (data2 == '%') {
+                    reboot();
+                    data2 = '\0';
+                } else if (data2 == '^') {
+                    shutdown();
+                    data2 = '\0';
+                } else if (data2 == '&') {
+                    task("Detecting ATA devices...",0);
+                    ide_detect_drives();
+                    task("Detecting ATA devices...",1);
+                    data2 = '\0';
+                } else if (data2 == '*') {
+                    task("Detecting PCI devices...",0);
+                    for (int i; i < 255; i++) {
+                        detect_pci(i);
+                    }
+                    task("Detecting PCI devices...",1);
+                    data2 = '\0';
+                } else if (data2 == '`') {
+                    break;
                 }
             }
-            terminal_row = 6;
-            terminal_column = 6;
-            terminal_writestring("Select a color");
-        }
-        if (data == '\n') { // Null-terminate the input
+        } else if (data == '\n') {
             if (strcmp(input_buffer, "ls") == 0) {
 				terminal_newline();
 				if (fsinit != true) {
-                    for (int i = 0; i < sizeof(fakeroot) / sizeof(fakeroot[0]); i++) {
+                    for (int i = 0; i < sizeof(fakeroot[0]); i++) {
+            			if (fakeroot[i] == 0) {
+            				continue;
+            			}
                         printf("%s ", fakeroot[i]);
                     }
-				} else {
 				}
+            } else if (strcmp(input_buffer, "vga2urt") == 0) {
+                terminal_initialize();
+                printf("Output redirected to UART!");
+                printf("%nIf you don't see any output on COM1, enter the command 'urt2vga'.");
+                isuart = true;
+            } else if (strcmp(input_buffer, "urt2vga") == 0) {
+                isuart = false;
            } else if (strcmp(input_buffer, "loop") == 0) {
-		uint16_t i;
-		while (i < 100) {
-			i++;
-			terminal_newline();
-			printf("hello, world!");
-		}
-	   } else if (strcmp(input_buffer, "le") == 0) {
-                printf("%n");
-                for (int i = 0; i < size; i++) {
-		   if (eventlog[i] == 0) {
-		     continue;	
-                   } 
-                   printf("%s ", eventlog[i]);
-		    terminal_newline();
-                }
-
+    		uint16_t i;
+    		while (i < 100) {
+    			i++;
+    			terminal_newline();
+    			printf("hello, world!");
+    		}
+    	   } else if (strcmp(input_buffer, "le") == 0) {
+                    for (int i = 0; i < size; i++) {
+            		    if (eventlog[i] == 0) {
+            		      continue;	
+                        } 
+                        terminal_newline();
+                        printf("%s ", eventlog[i]);
+                    }
             } else if (strcmp(input_buffer, "lsd") == 0) {
-                terminal_newline();
+                printf("%n");
                 for (int i = 0; i < sizeof(drives) / sizeof(drives[0]); i++) {
                     if (drives[i] == 0) {
-			continue;
-		    }
-                    terminal_writestring(drives[i]);
-                    terminal_newline();
+        			     continue;
+        		    }
+                    printf("%n",drives[i]);
                 }
-			//} else if (strncmp(input_buffer, "cat ", 4) == 0) {
-            //    read_file(input_buffer + 4); // Read file command
-            //} else if (strncmp(input_buffer, "echo ", 5) == 0) {
-            //   char* filename = strtok(input_buffer + 5, " ");
-            //    char* content = strtok(NULL, "\0");
-            //    if (filename && content) {
-            //        write_file(filename, content);
-            //    } else {
-            //        terminal_writestring("Usage: echo <filename> <content>\n");
-            //    }
-            } else if (strcmp(input_buffer, "r") == 0) {
-                countmem();
-                ide_detect_drives();
+            } else if (strncmp(input_buffer, "echo ", 5) == 0) {
+                char* content = strtok(input_buffer + 5, " ");
+                printf("%s",content);
+            } else if (strcmp(input_buffer, "help") == 0) {
+				terminal_newline();
+				printf("PotatoOS %s.",version);
+				printf("%s%n%n",subversion);
+                printf("ls                  => Lists nodes in the current directory.%n");
+                printf("vga2urt             => Redirects the output to COM1.%n");
+                printf("urt2vga             => Redirects the output to VGA.%n");
+                printf("loop                => Prints 'Hello, World!' 100 times.%n");
+                printf("le                  => List kernel events.%n");
+                printf("echo                => Print text to the terminal%n");
+                printf("lsd                 => List drives.%n");
+                printf("help                => Shows this message.%n");
+                printf("clear               => Clears the screen.%n");
+                printf("panic               => Kernel panics.%n");
+                printf("lsd                 => List drives.%n");
+                printf("reboot              => Reboots the computer.%n");
+                printf("shutdown            => Turns off the computer.%n");
+                printf("rk                  => Restarts the kernel.%n");
+                printf("waitwrite           => Waits before outputting a char.%n");
+                printf("datetime            => Prints the date and time.%n");
+                printf("beep                => Uses the PC beeper.%n");
+                
+            } else if (strcmp(input_buffer, "beep") == 0) {
+                beep();
+			} else if (strcmp(input_buffer, "clear") == 0) {
+	            terminal_initialize();
+                terminal_row--;
+			} else if (strcmp(input_buffer, "panic") == 0) {
+				panic("User called panic.");
+            } else if (strcmp(input_buffer, "reboot") == 0) {
+				reboot();
+                panic("Fail to reboot");
+            } else if (strcmp(input_buffer, "rk") == 0) {
+                havebeeninitbefore = false;
+                kernel_main();
+            } else if (strcmp(input_buffer, "waitwrite") == 0) {
+                waitwrite = true;
+			} else if (strcmp(input_buffer, "shutdown") == 0) {
+				shutdown();
             } else if (strcmp(input_buffer, "datetime") == 0) {
                 read_rtc();
                 char yearstr;
@@ -1052,198 +1325,32 @@ void handle_keyboard_input() {
                 char minutestr;
                 char secondstr;
                 char daystr;
-                terminal_newline();
-                terminal_writestring("[m/d/y]: ");
+                printf("%n[m/d/y]: ");
                 intToStr(month, monthstr);
-                terminal_writestring(monthstr);
-                terminal_writestring("/");
+                printf("/%s",monthstr);
                 intToStr(day, daystr);
-                terminal_writestring(daystr);
+                printf(daystr);
                 intToStr(year, yearstr);
-                terminal_writestring("/");
-                terminal_writestring(yearstr);
+                printf("/%s", yearstr);
                 intToStr(hour, hourstr);
-                terminal_writestring(" at [h/m] ");
-                terminal_writestring(hourstr);
+                printf(" at [h/m] %s",hourstr);
                 intToStr(minute, minutestr);
-                terminal_writestring(":");
-                terminal_writestring(minutestr);
-            } else if (strncmp(input_buffer, "echo ", 5) == 0) {
-                char* content = strtok(input_buffer + 5, " ");
-                terminal_newline();
-                terminal_writestring(content);
-            } else if (strcmp(input_buffer, "m") == 0){
-                m();
-            } else if (strcmp(input_buffer, "ppm") == 0) {
-                terminal_newline();
-                terminal_writestring("PotatoOS Package Manager");
-                terminal_newline();
-                terminal_writestring("Usage ppm [install][remove][update] [package name]");
-                terminal_newline();
-                terminal_writestring("This is a placeholder.");
-			} else if (strcmp(input_buffer, "help") == 0) {
-				terminal_newline();
-				printf("PotatoOS ");
-				printf(version);
-				printf(".");
-				printf(subversion);
-				terminal_newline();
-				terminal_newline();
-                printf("fatinit         - Initialize the FAT.");
-                terminal_newline();
-                printf("shutdown        - Shut down the computer.");
-                terminal_newline();
-                printf("color           - Show the color test screen.");
-                terminal_newline();
-                printf("ls              - List all the contents of the currently open directory.");
-                terminal_newline();
-                printf("echo            - Output text onto the terminal.");
-                terminal_newline();
-                printf("cat             - View the contents of a file.");
-                terminal_newline();
-                printf("waitwrite       - Wait a duration of time before outputting a character onto the terminal, an example of this is in the kernel panic screen.");
-                terminal_newline();
-                printf("ld              - Link object files and libraries.");
-			} else if (strcmp(input_buffer, "clear") == 0) {
-				/*terminal_buffer = (uint16_t*) 0xB8000;
-				for (size_t y = 0; y < VGA_HEIGHT; y++) {
-					for (size_t x = 0; x < VGA_WIDTH; x++) {
-						const size_t index = y * VGA_WIDTH + x;
-						terminal_buffer[index] = vga_entry(' ', terminal_color);
-					}
-				}
-				terminal_row = 1; */
-	            terminal_initialize();
-				//terminal_column = 2;
-			//} else if (strcmp(input_buffer, "fsinit") == 0) {
-			//	filesystem_initialize();
-            } else if (strcmp(input_buffer, "pacdeg") == 0) {
-                task("a", 1);
-                terminal_newline();
-            } else if (strcmp(input_buffer, "exit") == 0) {
-                exitHKIloop = true;
-			} else if (strcmp(input_buffer, "panic") == 0) {
-				panic("User called panic.");
-            } else if (strcmp(input_buffer, "reboot") == 0) {
-				reboot();
-            } else if (strcmp(input_buffer, "rk") == 0) {
-                havebeeninitbefore = false;
-                kernel_main();
-            } else if (strcmp(input_buffer, "g") == 0) {
-                terminal_newline();
-                printf("▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄");
-                terminal_newline();
-                printf("█ ▄▄▄▄▄ █▄ ▄███ ▄▄▄▄▄ █");
-                terminal_newline();
-                printf("█ █   █ █   ▀██ █   █ █");
-                terminal_newline();
-                printf("█ █▄▄▄█ █▄ ▀ ▄█ █▄▄▄█ █");
-                terminal_newline();
-                printf("█▄▄▄▄▄▄▄█▄█▄▀▄█▄▄▄▄▄▄▄█");
-                terminal_newline();
-                printf("█    █▀▄▀ ▀▄██ █▀ ▄▄█ █");
-                terminal_newline();
-                printf("█ █▀▄██▄▀▀█  █ ▄ █ █ ▄█");
-                terminal_newline();
-                printf("█▄█▄███▄▄▀  ▀ █ ▄ ██ ▀█");
-                terminal_newline();
-                printf("█ ▄▄▄▄▄ ██ ▄▄▀ █▄▄▄▀▀██");
-                terminal_newline();
-                printf("█ █   █ █▀▀▄▄▀▀▀██▄▄█▄█");
-                terminal_newline();
-                printf("█ █▄▄▄█ █ ▄▀█  ▀▀▀█▄█▀█");
-                terminal_newline();
-                printf("█▄▄▄▄▄▄▄█▄▄████▄█▄█▄███");
-                //set_vga_mode();
-            } else if (strcmp(input_buffer, "fatinit") == 0) {
-                terminal_newline();
-                terminal_writestring("[      ] Attempting to initialize FAT...");
-                if (mainfat() == 0) {
-                    fsinit = true;
-                } else {
-                    fsinit = false;
-                }
-            } else if (strcmp(input_buffer, "waitwrite") == 0) {
-                waitwrite = true;
-                /* if (content == true) {
-                    waitwrite = content;
-                    terminal_newline();
-                    terminal_writestring("waitwrite is now turned on.");
-                } else if (content == false) {
-                    waitwrite = content;
-                    terminal_newline();
-                    terminal_writestring("waitwrite is now turned off.");
-                } */
-			} else if (strcmp(input_buffer, "shutdown") == 0) {
-				shutdown();
-            //} else if (strcmp(input_buffer, "setup") == 0) {
-            //    setup();
-            } else if (strncmp(input_buffer, "un ", 2) == 0) {
-                username = strtok(input_buffer + 2, " ");
-                terminal_newline();
-                terminal_writestring("Username is now: ");
-                terminal_writestring(username);
-            } else if (strcmp(input_buffer, "tg") == 0) {
-                home();
-            } else if (strcmp(input_buffer, "color") == 0) {
-                while (1)   {
-                    uint16_t wait = VGA_HEIGHT - VGA_WIDTH;
-                    //terminal_row = 0;
-                    //terminal_buffer = (uint16_t*) 0xB8005;
-                    for (size_t y = 0; y < VGA_HEIGHT - wait; y++) {
-
-                        terminal_buffer = (uint32_t*) 0xB9000;
-                        outb(0x3D4, 0x0A);
-                        outb(0x3D5, 0x20);
-                        for (size_t y = 0; y < VGA_HEIGHT; y++) {
-                            for (size_t x = 0; x < VGA_WIDTH; x++) {
-                                const size_t index = y * VGA_WIDTH + x;
-                                terminal_buffer[index] = vga_entry(' ', terminal_color);
-                                //for (volatile int i = 0; i < wait; i++);
-                                //for (volatile int i = 0; i < wait; i++) {
-                                terminal_color = vga_entry_color(y,x);
-                                    //printf(" ");
-                                //    terminal_color = vga_entry_color(i, i); 
-                                //}
-                                //wait -= 10;
-                                //terminal_color = vga_entry_color(wait, wait); 
-                               // data = read_keyboard();
-                                //if (data == 0);
-                                terminal_column += 1;
-                                waitwrite = true;
-                                //nyan();
-                                //for (volatile int i = 0; i < 6000; i++);
-                            }
-                            //beep(y);
-                        }
-                        terminal_color = vga_entry_color(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLACK); 
-                        
-                       
-
-
-
-                        outb(0x3D4, 0x0A);
-                        outb(0x3D5, 0x02);
-                    }
-                }
+                printf(":%s",minutestr);
             } else if (input_buffer_index != 0) {
-            	terminal_newline();
 				char* command = input_buffer;
-                printf("'");
-                printf(input_buffer);
-                printf("'");
-                printf(" unknown command or file name.");
+                printf("%n'%s' unknown command or file name.", input_buffer); 
             }
-            terminal_newline();
-            terminal_writestring(username);
-            terminal_writestring("@");
-            terminal_writestring(hostname);
-            terminal_writestring(" /> ");
+            printf("%n%s",username);
+            printf("@%s /> ",hostname);
             input_buffer_index = 0; // Reset input buffer index
         } else {
             if (input_buffer_index < sizeof(input_buffer) - 1) {
                 input_buffer[input_buffer_index++] = data;
-                terminal_putchar(data);
+                if (isuart) {
+                    uart_putc(data);
+                } else {
+                    terminal_putchar(data);
+                }
             }
         }
     }
@@ -1295,35 +1402,56 @@ int paniccolor = 8;
 
 void panic(char* msg) 
 {
-	terminal_color = vga_entry_color(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLACK); 
+    beep();
+    outb(0xED, KBD_CTRL_PORT);
+    outb(0x01, KBD_DATA_PORT);
+    outb(0xED, KBD_CTRL_PORT);
+    outb(0x00, KBD_DATA_PORT);
+    outb(0xED, KBD_CTRL_PORT);
+    outb(0x02, KBD_DATA_PORT);
+    //terminal_initialize();
+    terminal_color = vga_entry_color(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLACK); 
     terminal_buffer = (uint16_t*) 0xB8000;
     input_buffer_index = 0;
     
     //waitwrite = true;
     terminal_newline();
-	terminal_writestring("An error occurred and the system has been shutdown."); // ***The cake is a lie***
-    terminal_newline();
+	//terminal_writestring(""); // ***The cake is a lie***
+    //terminal_newline();
 	//terminal_writestring("Contact me at ospotato3@gmail.com with the error message below.");
     //terminal_newline();
 	//terminal_writestring("Github: https://github.com/winvistalover/PotatoOS/tree/nightly");
-    terminal_newline();
-    terminal_newline();
-	terminal_writestring("Panic: ");
-	terminal_writestring(msg);
+    //terminal_newline();
+    //terminal_newline();
+    uart_puts("\nKERNEL FUNCTION PANIC:");
+    terminal_writestring("Panic: ");
+    terminal_writestring(msg);
+    uart_puts("\nPanic: ");
+    uart_puts(msg);
 	terminal_newline();
-	terminal_writestring("Kernel: ");
-	terminal_writestring(osname);
-	terminal_writestring(" ");
-	terminal_writestring(version);
-	terminal_writestring(".");
-	terminal_writestring(subversion);
+    terminal_writestring("Kernel: ");
+    terminal_writestring(osname);
+    terminal_writestring(" ");
+    terminal_writestring(version);
+    terminal_writestring(".");
+    terminal_writestring(subversion);
+    uart_puts("\nKernel: ");
+    uart_puts(osname);
+    uart_puts(" ");
+    uart_puts(version);
+    uart_puts(".");
+    uart_puts(subversion);
 	terminal_newline();
-    terminal_newline();
-    terminal_newline();
-
-    terminal_writestring("The system will stop.");
-    terminal_newline();
-    terminal_writestring("Sending hlt...");
+    //terminal_newline();
+    //terminal_newline();
+    //terminal_writestring("The system will stop.");
+    //terminal_newline();
+    terminal_writestring("Press any key to reboot...");
+    uint8_t data = read_keyboard();
+    data = read_keyboard();
+    while (data != 0) {
+        reboot();
+    }
     /*
     terminal_newline();
     terminal_row = VGA_HEIGHT - 3;
@@ -1354,6 +1482,7 @@ void panic(char* msg)
 //#define VGA_DATA_REGISTER 0x3D5
 
 
+// Host-to-network byte order conversion (htonl, htons)
 uint32_t htonl(uint32_t hostlong) {
     return ((hostlong & 0xFF000000) >> 24) |
            ((hostlong & 0x00FF0000) >> 8)  |
@@ -1361,12 +1490,11 @@ uint32_t htonl(uint32_t hostlong) {
            ((hostlong & 0x000000FF) << 24);
 }
 
-// Convert 16-bit integer from host to network byte order
 uint16_t htons(uint16_t hostshort) {
     return (hostshort >> 8) | (hostshort << 8);
 }
 
-// Define network structures
+// Network structures
 struct ip_header {
     uint8_t  version_ihl;
     uint8_t  type_of_service;
@@ -1388,46 +1516,50 @@ struct icmp_header {
     uint16_t sequence_number;
 };
 
-// Function to calculate checksum
 uint16_t checksum(void *data, size_t len) {
     uint32_t sum = 0;
     uint16_t *ptr = (uint16_t *)data;
+    
+    // Add 16-bit words to sum
     for (size_t i = 0; i < len / 2; i++) {
         sum += *ptr++;
     }
+
+    // If odd byte, add the remaining byte
     if (len % 2) {
         sum += *(uint8_t *)ptr;
     }
+
+    // Handle overflow by wrapping around and adding
     while (sum >> 16) {
         sum = (sum & 0xFFFF) + (sum >> 16);
-        printf(".");
     }
-    return ~sum;
+
+    return ~sum; // Return the one's complement of the sum
 }
 
-// Function to send data through the network controller
-void network_send(uint8_t *packet, size_t length) {
-    // Example I/O port addresses for the Intel PRO/100 VE
-    uint16_t io_base = 0xB8000; // This should be the actual I/O base address of your network card
 
+// Function to send data through the network controller (example placeholder)
+void network_send(uint8_t *packet, size_t length) {
+    uint16_t io_base = 0xB8000;  // Adjust to your network card's I/O base address
+    
     // Write the packet to the transmit buffer
     for (size_t i = 0; i < length; i++) {
         outb(io_base + i, packet[i]);
-        printf(".");
     }
 
-    // Trigger the transmission
-    outb(io_base + 0x10, 0x01); // Example command to start transmission
+    // Trigger transmission
+    outb(io_base + 0x10, 0x01);  // Example command to initiate packet transmission
 }
 
 // Function to receive data from the network controller
 size_t network_receive(uint8_t *buffer, size_t max_length) {
-    // Example I/O port addresses for the Intel PRO/100 VE
-    uint16_t io_base = 0x1500; // This should be the actual I/O base address of your network card
-
+    uint16_t io_base = 0x1500;  // Adjust to your network card's I/O base address
+    
     // Check if data is available
-    if (inb(io_base + 0x20) & 0x01) { // Example status register check
-        size_t length = inb(io_base + 0x24); // Example length register
+    if (inb(io_base + 0x20) & 0x01) {  // Example status register check
+        size_t length = inb(io_base + 0x24);  // Example length register
+        
         if (length > max_length) {
             length = max_length;
         }
@@ -1435,76 +1567,156 @@ size_t network_receive(uint8_t *buffer, size_t max_length) {
         // Read the packet from the receive buffer
         for (size_t i = 0; i < length; i++) {
             buffer[i] = inb(io_base + i);
-            printf(".");
         }
 
         return length;
     }
 
-    return 0; // No data received
+    return 0;  // No data received
 }
 
-// Function to send ICMP echo request (ping)
 void send_ping(uint32_t dest_ip) {
-    struct ip_header ip;
+    /*struct ip_header ip;
     struct icmp_header icmp;
     uint8_t packet[sizeof(ip) + sizeof(icmp)];
 
     // Fill IP header
-    ip.version_ihl = 0x45;
+    ip.version_ihl = 0x45; // IPv4, 5 32-bit words (no options)
     ip.type_of_service = 0;
-    ip.total_length = htons(sizeof(ip) + sizeof(icmp));
+    ip.total_length = htons(sizeof(ip) + sizeof(icmp)); // Total length of IP + ICMP header
     ip.identification = 0;
     ip.flags_fragment_offset = 0;
     ip.time_to_live = 64;
-    ip.protocol = 0; // ICMP
+    ip.protocol = 0x01; // ICMP protocol
     ip.header_checksum = 0;
     ip.source_address = htonl(0xC0A80001); // 192.168.0.1
-    ip.destination_address = htonl(dest_ip);
-    ip.header_checksum = checksum(&ip, sizeof(ip));
+    ip.destination_address = honl(dest_ip);
+    ip.header_checksum = checksum(&ip, sizeof(ip));  // Calculate checksum for IP header
 
-    // Fill ICMP header
     icmp.type = 8; // Echo request
     icmp.code = 0;
-    icmp.checksum = 0;
+    icmp.checksum = 0;  // Will calculate this after filling
     icmp.identifier = htons(1);
     icmp.sequence_number = htons(1);
+
+    // Calculate ICMP checksum
     icmp.checksum = checksum(&icmp, sizeof(icmp));
 
     // Copy headers to packet
     memcpy(packet, &ip, sizeof(ip));
     memcpy(packet + sizeof(ip), &icmp, sizeof(icmp));
 
-    printf(htonl(0xC0A80001));
-    // Send packet
-    network_send(packet, sizeof(packet));
+    // Print to confirm protocol is set correctly
+    terminal_writestring("[ DEBUG ] Sending Ping to: ");
+    terminal_putchar((dest_ip >> 24) & 0xFF); // Print the destination IP
+    terminal_putchar((dest_ip >> 16) & 0xFF);
+    terminal_putchar((dest_ip >> 8) & 0xFF);
+    terminal_putchar(dest_ip & 0xFF);
+    terminal_newline();
+
+    // Double-check total packet length
+    uint32_t packet_size = sizeof(ip) + sizeof(icmp);
+    terminal_writestring("[ DEBUG ] Packet Size: ");
+    terminal_putchar((packet_size >> 24) & 0xFF); // High byte
+    terminal_putchar((packet_size >> 16) & 0xFF);
+    terminal_putchar((packet_size >> 8) & 0xFF);
+    terminal_putchar(packet_size & 0xFF); // Low byte
+    terminal_newline();
+
+    // Copy the IP and ICMP headers into the packet
+    memcpy(packet, &ip, sizeof(ip));
+    memcpy(packet + sizeof(ip), &icmp, sizeof(icmp));
+
+    // Send the packet via network
+    network_send(packet, sizeof(packet));*/
 }
+
+
+uint32_t ntohl(uint32_t netlong) {
+    return ((netlong & 0x000000FF) << 24) | 
+           ((netlong & 0x0000FF00) << 8)  |
+           ((netlong & 0x00FF0000) >> 8)  |
+           ((netlong & 0xFF000000) >> 24);
+}
+
 
 // Function to receive ICMP echo reply (ping response)
 void receive_ping() {
     uint8_t buffer[1500];
-    size_t len = network_receive(buffer, sizeof(buffer));
+    size_t len = network_receive(buffer, sizeof(buffer));  // Receive data from network
 
-    struct ip_header *ip = (struct ip_header *)buffer;
-    struct icmp_header *icmp = (struct icmp_header *)(buffer + sizeof(struct ip_header));
+    if (len > 0) {
+        struct ip_header *ip = (struct ip_header *)buffer;
+        struct icmp_header *icmp = (struct icmp_header *)(buffer + sizeof(struct ip_header));
 
-    if (icmp->type == 0 && icmp->code == 0) { // Echo reply
-        // Process the reply (e.g., print success message)
+        // Check if the received packet is at least large enough for the IP and ICMP headers
+        if (len < sizeof(struct ip_header) + sizeof(struct icmp_header)) {
+            terminal_newline();
+            terminal_writestring("[ ERROR ] Packet too short for ICMP");
+            return;
+        }
+
+        // Debugging output to see the protocol field
         terminal_newline();
-        terminal_writestring("[  OK  ] Attempting to ping 192.168.0.2...");
-        networkinit = true;
+        terminal_writestring("[ DEBUG ] Received packet: ");
+        for (size_t i = 0; i < len && i < 16; i++) {  // Print up to 16 bytes for debugging
+            terminal_putchar(buffer[i]);
+            if (i < len - 1) terminal_putchar(' ');
+        }
+
+        terminal_newline();
+        terminal_writestring("[ DEBUG ] IP Protocol: ");
+        terminal_putchar((ip->protocol / 10) + '0');  // Print first digit
+        terminal_putchar((ip->protocol % 10) + '0');  // Print second digit
+
+        // Validate the IP header protocol (should be ICMP, protocol number 1)
+        if (ip->protocol != 1) {
+            terminal_newline();
+            terminal_writestring("[ ERROR ] Invalid protocol in IP header");
+            return;
+        }
+
+        // ICMP checksum validation
+        uint16_t calculated_checksum = checksum(icmp, sizeof(struct icmp_header));
+        if (icmp->checksum != calculated_checksum) {
+            terminal_newline();
+            terminal_writestring("[ ERROR ] ICMP checksum mismatch");
+            return;
+        }
+
+        // Check for ICMP Echo Reply (type 0, code 0)
+        if (icmp->type == 0 && icmp->code == 0) {  // Echo reply
+            // Print success message and relevant info
+            terminal_newline();
+            terminal_writestring("[  OK  ] Ping successful: ");
+            
+            uint32_t source_ip = ntohl(ip->source_address);
+            uint8_t byte1 = (source_ip >> 24) & 0xFF;
+            uint8_t byte2 = (source_ip >> 16) & 0xFF;
+            uint8_t byte3 = (source_ip >> 8) & 0xFF;
+            uint8_t byte4 = source_ip & 0xFF;
+
+            // Print the source IP address
+            terminal_putchar(byte1 + '0');
+            terminal_putchar('.');
+            terminal_putchar(byte2 + '0');
+            terminal_putchar('.');
+            terminal_putchar(byte3 + '0');
+            terminal_putchar('.');
+            terminal_putchar(byte4 + '0');
+            terminal_newline();
+        } else {
+            terminal_newline();
+            terminal_writestring("[ FAIL ] Received invalid ICMP Echo reply");
+        }
     } else {
         terminal_newline();
-        terminal_writestring("[ FAIL ] Attempting to ping 192.168.0.2...");
-        terminal_newline();
-        networkinit = false;
-
+        terminal_writestring("[ ERROR ] No response received or timeout");
     }
-    terminal_newline();
-    terminal_putchar(icmp->code);
-    terminal_newline();
-    terminal_putchar(icmp->type);
 }
+
+
+
 
 void int32(uint8_t intnum, uint16_t ax, uint16_t bx, uint16_t cx, uint16_t dx, uint16_t *ax_out) {
     /* asm volatile (
@@ -1526,30 +1738,23 @@ unsigned int page_directory[NUM_PAGES] __attribute__((aligned(PAGE_SIZE)));
 unsigned int first_page_table[NUM_PAGES] __attribute__((aligned(PAGE_SIZE)));
 
 void setup_paging() {
-    // Initialize the first page table
     for (int i = 0; i < NUM_PAGES; i++) {
-        first_page_table[i] = (i * PAGE_SIZE) | 3; // Present, read/write
+        printf('.');
+        first_page_table[i] = (i * PAGE_SIZE) | 3;
     }
-    task("Initialize the first page table", 1);
 
-    // Initialize the page directory
-    page_directory[0] = ((unsigned int)first_page_table) | 3; // Present, read/write
+    page_directory[0] = ((unsigned int)first_page_table) | 3;
 
     for (int i = 1; i < NUM_PAGES; i++) {
-        page_directory[i] = 0; // Not present
+        page_directory[i] = 0; 
     }
-    task("Initialize the page directory", 1);
 
-    // Load page directory address into CR3
     asm volatile("mov %0, %%cr3" :: "r"(page_directory));
-    task("Load page directory address into CR3", 1);
 
-    // Enable paging by setting the PG bit in CR0
     unsigned int cr0;
     asm volatile("mov %%cr0, %0" : "=r"(cr0));
-    cr0 |= 0x80000000; // Set PG bit
+    cr0 |= 0x80000000; 
     asm volatile("mov %0, %%cr0" :: "r"(cr0));
-    task("Enable paging by setting the PG bit in CR0", 1);
 }
 
 void load_page_directory(uint32_t* page_directory) {
@@ -1591,7 +1796,6 @@ void draw_box(int x1, int y1, int x2, int y2, uint8_t color) {
 
 
 void draw_char(uint8_t* framebuffer, int x, int y, char c) {
-    // Define a simple font
     uint8_t font[256][8] = {
         // A
         {0x1F, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x1F},
@@ -1718,27 +1922,15 @@ void draw_char(uint8_t* framebuffer, int x, int y, char c) {
         // ~
         {0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01}
     };
-
-    
-
-
-
-    // Get the font data for the character
     uint8_t* font_data = font[c];
-
-    // Draw the character on the screen
     for (int i = 0; i < 8; i++) {
-        for (int j = 0; j < 8; j++) {
-            if (font[c][i] /* & (1 << j) */)  {
-                framebuffer[(y + i) + (x + j)] = 0x30; // White
-            }
-        }
+        terminal_buffer[(x) + (y)] = font_data; // White
     }
 }
 
 void draw_string(uint8_t* framebuffer, int x, int y, char* str) {
     for (int i = 0; str[i] != '\0'; i++) {
-        draw_char(framebuffer, x + i * 8, y, str[i]);
+        draw_char(terminal_buffer, x + i, y, str[i]);
     }
 }
 
@@ -1760,10 +1952,6 @@ void disable_cursor()
 
 
 void setup_framebuffer() {
-    uint8_t* framebuffer = (uint8_t*)FRAMEBUFFER_ADDRESS;
-    for (int i = 0; i < FRAMEBUFFER_SIZE; i++) {
-        framebuffer[i] = 0x03; // Black
-    }
 }
 
 void update_cursor(int x, int y)
@@ -1793,45 +1981,9 @@ int wait(int num) {
 }
 
 void set_vga_mode() {
-    //terminal_initialize();
-    task("Stop for 6000000...", 0);
-    //for (volatile int i = 0; i < 6000000; i++);
-    wait(6);
-    task("Set VESA mode number...", 0);
+    uart_puts("\nKERNEL FUNCTION SET_VGA_MODE: Setting VGA mode...");
     outb(0x3C4, 0x4F01);
-    outb(0x3C5, 0x101); // Set VESA mode number
-    task("Set VESA mode number...", 2);
-    task("Switch to 800x600x16 mode...", 0);
-    outb(0x3C4, 0x4F02);
-    outb(0x3C5, 0x101); // Switch to 800x600x16 mode
-    task("Switch to 800x600x16 mode...", 2);
-    task("Change cursor", 0);
-    outb(0x3D4, 0x0A);
-    outb(0x3D5, 0x02);
-    task("Change cursor", 1);
-
-    // Clear the display memory
-    uint8_t* framebuffer = (uint8_t*)0xB8000;
-    // Ensure the framebuffer address is correct for the mode
-
-    task("Stop for 6000000...", 0);
-    wait(6);
-    task("Stop for 6000000...", 1);
-    for (int i = 0; i < 800 * 600; i++) {
-        //for (volatile int i = 0; i < 6000; i++);
-        //draw_vertical_line(i,i + 10,i + 20, 0xFF);
-       //draw_string(framebuffer, 100, 100, "testaaaaaaaaaaaaaaaaaaaaaaa");
-        framebuffer[i] = 0x33; // Clear to black
-     //   //terminal_newline();
-    }
-
-    while (1) {
-        printf(".");
-        int d = 0;
-        d += 1;
-       framebuffer[d] = 0x00;
-        //for (volatile int i = 0; i < 6000; i++);
-    }
+    outb(0x3C5, 0x101);
 }
 
 
@@ -1840,265 +1992,8 @@ void set_vga_mode() {
 
 bool fixed;
 
-void m() {
-    terminal_initialize();
-    outb(0x3C4, 0x01);
-    outb(0x3C5, 0x01);
-    outb(0x3C4, 0x02);
-    outb(0x3C5, 0x99);
-    outb(0x3C4, 0x03);
-    outb(0x3C5, 0x00);
-    outb(0x3C4, 0x04);
-    outb(0x3C5, 0x80);
-}
-
-int fixflash() {
-    terminal_color = vga_entry_color(VGA_COLOR_LIGHT_GREY, paniccolor); 
-    terminal_buffer = (uint16_t*) 0xB8000;
-    input_buffer_index = 0;
-
-    for (size_t y = 0; y < VGA_HEIGHT; y++) {
-        for (size_t x = 0; x < VGA_WIDTH; x++) {
-            const size_t index = y * VGA_WIDTH + x;
-            terminal_buffer[index] = vga_entry(' ', terminal_color);
-            for (volatile int i = 0; i < 60000; i++);
-        }
-    }
-    //waitwrite = true;
-    terminal_row = 6;
-    terminal_newline();
-    terminal_column = 6;
-    terminal_writestring("Is this flashing? [Y/n]");
-
-    uint8_t data2 = read_keyboard();
-    terminal_column = 6;
-    terminal_putchar(data2);
-    if (data2 == 'y' || data2 == '\n') {
-        paniccolor = VGA_COLOR_BLACK;
-    }
-}
-
-int drawbg() {
-    terminal_buffer = (uint16_t*) 0xB8000;
-    for (size_t y = 0; y < VGA_HEIGHT; y++) {
-        for (size_t x = 0; x < VGA_WIDTH; x++) {
-            const size_t index = y * VGA_WIDTH + x;
-            terminal_color = vga_entry_color(VGA_COLOR_DARK_GREY + y, VGA_COLOR_DARK_GREY + y);
-            terminal_buffer[index] = vga_entry(' ', terminal_color);
-            //for (volatile int i = 0; i < 60000; i++);
-        }
-    }
-}
-int cury = 6;
-int curx = 55;
-
-int home() {
-
-    drawbg();
-    //waitwrite = true;
-    for (volatile int i = 0; i < 60000000; i++);
-    terminal_color = vga_entry_color(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLACK);
-    terminal_row = 6;
-    for (int i = 0; i < 13; i++) {
-        terminal_column = 11;
-        terminal_writestring("                                                       ");
-        terminal_newline();
-        for (volatile int i = 0; i < 60000; i++);
-    }
-    terminal_row = 3;
-    terminal_color = vga_entry_color(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BROWN); 
-    terminal_newline();
-    terminal_column = 10;
-    terminal_writestring(" Programs                                            x ");
-    terminal_color = vga_entry_color(VGA_COLOR_LIGHT_GREY, VGA_COLOR_DARK_GREY);
-    terminal_newline();
-    terminal_column = 10;
-    terminal_writestring("                                                       ");
-    terminal_newline();
-    terminal_column = 10;	
-    terminal_writestring(" Placeholder                                           ");
-    terminal_newline();
-    terminal_column = 10;	
-    terminal_writestring(" Hello, World!                                         ");
-    terminal_newline();
-    for (int i = 0; i < 10; i++) {
-        terminal_column = 10;
-        terminal_writestring("                                                       ");
-        terminal_newline();
-    }
-    update_cursor(55, 6);
-    terminal_column = 10;
-    read_keyboard();
-    while (1) {
-        uint8_t data = read_keyboard();
-        if (data == 0) {
-        }
-        input_buffer[input_buffer_index] = '\0';
-        if (data == 'S') {
-            curx += 1;
-            update_cursor(curx, cury);
-        } else if (data == 'P') {
-            curx -= 1;
-            update_cursor(curx, cury);
-        } else if (data == 'U') {
-            cury -= 1;
-            update_cursor(curx, cury);
-        } else if (data == 'G') {
-            cury += 1;
-            update_cursor(curx, cury);
-        }
-        if (data == '\n') {
-            if (cury == 4 && curx == 63) {
-                welcomewind();
-            }
-        }
-        if (data == 'c') {
-            terminal_initialize();
-            shell();
-            home();
-        }
-        if (data == 'p') {
-            panic("User called panic");
-        }
-        //terminal_putchar(data);
-    }
-}
-
-int panicwind() {
-    drawbg();
-    terminal_color = vga_entry_color(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLACK);
-    terminal_row = 7;
-    for (int i = 0; i < 8; i++) {
-        terminal_column = 16;
-        terminal_writestring("                                                     ");
-        terminal_newline();
-    }
-    terminal_row = 5;
-    terminal_color = vga_entry_color(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BROWN); 
-    terminal_newline();
-    terminal_column = 15;
-    terminal_writestring(" Error                                               ");
-    terminal_color = vga_entry_color(VGA_COLOR_LIGHT_GREY, VGA_COLOR_LIGHT_GREY);
-    terminal_newline();
-    terminal_column = 15;
-    terminal_writestring("                                                     ");
-    terminal_newline();
-    terminal_column = 15;	
-    terminal_writestring(" An error occurred and the system has been shutdown. ");
-    terminal_newline();
-    terminal_column = 15;
-    for (int i = 0; i < 5; i++) {
-        terminal_column = 15;
-        terminal_writestring("                                                     ");
-        terminal_newline();
-    }
-    update_cursor(curx, cury);
-}
-
-int welcomewind() {
-    terminal_color = vga_entry_color(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLACK);
-    terminal_row = 7;
-    for (int i = 0; i < 8; i++) {
-        terminal_column = 13;
-        terminal_writestring("                                      ");
-        terminal_newline();
-    }
-    terminal_row = 5;
-    terminal_color = vga_entry_color(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BROWN); 
-    terminal_newline();
-    terminal_column = 12;
-    terminal_writestring(" Welcome                            x ");
-    terminal_color = vga_entry_color(VGA_COLOR_LIGHT_GREY, VGA_COLOR_LIGHT_GREY);
-    terminal_newline();
-    terminal_column = 12;
-    terminal_writestring("                                      ");
-    terminal_newline();
-    terminal_column = 12;	
-    terminal_writestring(" Welcome to ");
-    terminal_writestring(osname);
-    terminal_writestring(" ");
-    terminal_writestring(version);
-    terminal_writestring(".");
-    terminal_writestring(subversion);
-    terminal_writestring("!         ");
-    terminal_newline();
-    terminal_column = 12;
-    for (int i = 0; i < 5; i++) {
-        terminal_column = 12;
-        terminal_writestring("                                      ");
-        terminal_newline();
-    }
-    update_cursor(curx, cury);
-}
-
-int displayscreen() {
-
-    if (noprint) {
-        drawbg();
-        //waitwrite = true;
-        for (volatile int i = 0; i < 60000000; i++);
-        terminal_color = vga_entry_color(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLACK);
-        terminal_row = 6;
-        for (int i = 0; i < 12; i++) {
-            terminal_column = 11;
-            terminal_writestring("                                                       ");
-            terminal_newline();
-            for (volatile int i = 0; i < 60000; i++);
-        }
-        terminal_row = 3;
-        terminal_color = vga_entry_color(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BROWN); 
-        terminal_newline();
-        terminal_column = 10;
-        terminal_writestring(" PotatoOS Setup                                      x ");
-        terminal_color = vga_entry_color(VGA_COLOR_LIGHT_GREY, VGA_COLOR_DARK_GREY);
-        terminal_newline();
-        terminal_column = 10;
-        terminal_writestring("                                                       ");
-        terminal_newline();
-        terminal_column = 10;	
-    } else {
-        terminal_newline();
-    }
-
-    if (noprint) {
-        terminal_writestring(" Do you have a black and white display? [y/N]          ");
-        terminal_newline();
-        for (int i = 0; i < 10; i++) {
-            terminal_column = 10;
-            terminal_writestring("                                                       ");
-            terminal_newline();
-        }
-        update_cursor(55, 6);
-        terminal_column = 10;
-    } else {
-        terminal_writestring(" Do you have a black and white display? [y/N]");
-        terminal_newline();
-    }
-    read_keyboard();
-    uint8_t data = read_keyboard();
-    terminal_putchar(data);
-    if (data == 0) {
-    } else if (data == 'y') {
-        m();
-    }
-}
 
 
-
-void setup() {
-    outb(0x3D4, 0x0A);
-    outb(0x3D5, 0x02);
-    task("Running setup...", 0);
-    if (noprint) {
-        terminal_initialize();
-    }
-
-    displayscreen();
-    if (noprint) {
-        terminal_initialize();
-    }
-    task("Running setup...", 1);
-}
 
 typedef struct {
     uint32_t base_addr;
@@ -2140,11 +2035,14 @@ void get_memory_map(memory_map_entry_t *entries, uint32_t *num_entries) {
     uint32_t total_size = rsdt_addr + 36 + entry_size; 
 
 
-    terminal_writestring("BOOT: Total RAM size: ");
-    char size_str[20];
+    printf("BOOT: Total RAM size: ");
+    uart_puts("\nKERNEL FUNCTION GET_MEMORY_MAP: BOOT: Total RAM size: ");
+    char size_str;
     MenintToStr(total_size, size_str);
-    terminal_writestring(size_str);
-    terminal_writestring(" bytes");
+    printf(size_str);
+    uart_puts(size_str);
+    printf(" bytes");
+    uart_puts(" bytes");
 
     while (entry_addr < total_size) {
         entries[num].base_addr = *((uint32_t*)entry_addr);
@@ -2157,12 +2055,12 @@ void get_memory_map(memory_map_entry_t *entries, uint32_t *num_entries) {
 
     
     *num_entries = num;
-    terminal_newline();
-    terminal_writestring("BOOT: Num Entries: ");
+    printf("%nBOOT: Num Entries: ");
+    uart_puts("\nKERNEL FUNCTION GET_MEMORY_MAP: BOOT: Num Entries: ");
     char num_str[10];
     MenintToStr(num, num_str);
-    terminal_writestring(num_str);
-    //beep(800);
+    printf(num_str);
+    uart_puts(num_str);
 }
 
 
@@ -2177,7 +2075,7 @@ void MenintToStr(uint32_t N, char *str) {
         str[i++] = N % 10 + '0';
         N /= 10;
     }
-    if (i == 0) { // Handle 0 case
+    if (i == 0) {
         str[i++] = '0';
     }
     str[i] = '\0';
@@ -2200,7 +2098,7 @@ void intToStr(uint32_t N, char *str) {
     if (sign < 0) {
         str[i++] = '-';
     }
-    if (i == 0) { // Handle 0 case
+    if (i == 0) {
         str[i++] = '0';
     }
     str[i] = '\0';
@@ -2215,21 +2113,13 @@ void print_memory_size() {
     memory_map_entry_t entries[100];
     uint32_t num_entries = 0;
     get_memory_map(entries, &num_entries);
-
-
-
     int total_memory_size = 0;
     
-
     for (uint32_t i = 0; i < num_entries; i++) {
         if (entries[i].type == 1) {
             total_memory_size += entries[i].length / (1024 * 1024);
         }
     }
-
-
-    //waitwrite = true;
-
 }
 
 int countmem() {
@@ -2244,34 +2134,35 @@ void ide_detect_drives() {
     outb(0x1F6, 0xA0);
     uint8_t status = inb(0x1F7);
     if (status & 0x01) {
-        terminal_newline();
-        terminal_writestring("BOOT: Primary IDE master drive detected");
+        task("Primary IDE master drive detected", 1);
         drives[0] = "idep0";
     }
 
     outb(0x1F6, 0xB0);
     status = inb(0x1F7); 
     if (status & 0x01) {
-        terminal_newline();
-        terminal_writestring("BOOT: Primary IDE slave drive detected");
+        task("Primary IDE slave drive detected", 1);
         drives[1] = "idep1";
     }
 
     outb(0x1F6, 0xA8);
     status = inb(0x1F7);
     if (status & 0x01) {
-        terminal_newline();
-        terminal_writestring("BOOT: Secondary IDE master drive detected");
+        task("Secondary IDE master drive detected", 1);
         drives[2] = "ides0";
     }
 
     outb(0x1F6, 0xB8);
     status = inb(0x1F7);
     if (status & 0x01) {
-        terminal_newline();
-        terminal_writestring("BOOT: Secondary IDE slave drive detected");
+        task("Secondary IDE slave drive detected", 1);
         drives[3] = "ides1";
     }
+    task("Add drive files...", 0);
+    for (int i = 0; i < sizeof(drives) / sizeof(drives[0]); i++) {
+  	 fakeroot[i] = drives[i];
+    }
+    task("Add drive files...", 1);
 }
 
 #define VGA_CRTC_INDEX 0x3D4
@@ -2300,46 +2191,43 @@ void kernel_main(void)
 {
     /*uint16_t mode = 0x51;
     outb(0x3C0, mode);*/
+    VGA_HEIGHT++;
+    terminal_initialize();
+    terminal_writestring("Waiting for UART");
+    uart_init();
+    uart_puts("\nKERNEL FUNCTION MAIN: Loading kernel...");
+    //waitwrite = true;
+    uart_puts("\nKERNEL FUNCTION MAIN: Set cursor...");
     outb(0x3D4, 0x0A);
     outb(0x3D5, 0x02);
-    terminal_initialize();
+    //send_ping(0xC0A80002);
+    //receive_ping();
+    //wait(600000000000000);
     countmem();
-    ide_detect_drives();
-    terminal_newline();
-    printf("Welcome to ");
-    printf(osname);
-    printf("!");
-    terminal_newline();
-    task("Setup paging...", 0);
-    setup_paging();
-    task("Setup paging...", 1);
-    task("Setup framebuffer...", 0);
-    setup_framebuffer();
-    task("Setup framebuffer...", 1);
-    read_rtc();
-    terminal_newline();
-    terminal_writestring("WARNING: This is a nightly build!");
-
-    waitwrite = false;
-    if (!networkinit && !fsinit) {
-        shell();
-        shutdown();
+    task("Detecting PCI devices...",0);
+    for (int i; i < 255; i++) {
+    	detect_pci(i);
     }
+    task("Detecting PCI devices...",1);
+    task("Detecting ATA devices...",0);
+    ide_detect_drives();
+    task("Detecting ATA devices...",1);
+    
+    //task("Setup paging...", 0);
+    //setup_paging();
+    //task("Setup paging...", 1);
+    read_rtc();
 
-
-
-    char* config;
-    shell();
-
-
-}
-
-int findconfig(char* file) {
-    return -1;
+    //waitwrite = false;
+    if (!networkinit && !fsinit) {
+        uart_puts("\nKERNEL FUNCTION MAIN: Failed to init network and fs!");
+        shell();
+        reboot();
+    }
 }
 
 void shell() {
-    waitwrite = false;
+    //waitwrite = false;
     char yearstr;
     char monthstr;
     char hourstr;
@@ -2350,25 +2238,42 @@ void shell() {
     terminal_newline();
 terminal_color = vga_entry_color(VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
     terminal_writestring("New user login at [m/d/y]: ");
+    uart_puts("\nKERNEL FUNCTION SHELL: New user login at [m/d/y]: ");
     intToStr(month, monthstr);
     terminal_writestring(monthstr);
+    uart_puts(monthstr);
     terminal_writestring("/");
+    uart_puts("/");
     intToStr(day, daystr);
     terminal_writestring(daystr);
+    uart_puts(daystr);
     intToStr(year, yearstr);
     terminal_writestring("/");
     terminal_writestring(yearstr);
+    uart_puts("/");
+    uart_puts(yearstr);
     intToStr(hour, hourstr);
     terminal_writestring(" at [h/m] ");
     terminal_writestring(hourstr);
+    uart_puts(" at [h/m] ");
+    uart_puts(hourstr);
     intToStr(minute, minutestr);
     terminal_writestring(":");
     terminal_writestring(minutestr);
+    uart_puts(":");
+    uart_puts(minutestr);
+    uart_puts("\n");
     terminal_newline();
     terminal_writestring("User: ");
-	terminal_writestring(username);
+    terminal_writestring(username);
     terminal_writestring("@");
-	terminal_writestring(hostname);
+    terminal_writestring(hostname);
+    uart_puts("User: ");
+    uart_puts(username);
+    uart_puts("@");
+    uart_puts(hostname);
+    uart_puts("\n");
+    uart_puts("KERNEL FUNCTION SHELL: To switch from VGA to UART enter the command 'vga2urt'");
     terminal_newline();
 	terminal_writestring(username);
 	terminal_writestring("@");

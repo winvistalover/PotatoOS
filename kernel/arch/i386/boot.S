@@ -86,6 +86,7 @@ _start:
 	stack since (pushed 0 bytes so far), so the alignment has thus been
 	preserved and the call is well defined.
 	*/
+1:
 	call kernel_main
 
 	/*
@@ -100,8 +101,6 @@ _start:
 	3) Jump to the hlt instruction if it ever wakes up due to a
 	   non-maskable interrupt occurring or due to system management mode.
 	*/
-	cli
-1:	hlt
 	jmp 1b
 
 /*
